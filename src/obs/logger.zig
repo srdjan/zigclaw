@@ -6,7 +6,7 @@ pub const EventKind = enum {
     tool_run,
     agent_run,
     provider_call,
-    error,
+    err,
 };
 
 pub const Logger = struct {

@@ -105,15 +105,13 @@ pub fn run(
 
     // Build argv: wasmtime --mapdir HOST::GUEST ... <plugin.wasm>
     var argv = std.ArrayList([]const u8).init(a);
+    defer argv.deinit();
+
+    // Track heap-allocated map strings separately for correct cleanup
+    var map_strings = std.ArrayList([]u8).init(a);
     defer {
-        // free map strings
-        for (argv.items) |arg| {
-            if (std.mem.indexOf(u8, arg, "::") != null and !std.mem.eql(u8, arg, plugin_path) and !std.mem.eql(u8, arg, cfg.raw.tools.wasmtime_path) and !std.mem.eql(u8, arg, "--mapdir")) {
-                // best-effort heuristic; safe because strings were allocPrint'd
-                a.free(@constCast(arg));
-            }
-        }
-        argv.deinit();
+        for (map_strings.items) |s| a.free(s);
+        map_strings.deinit();
     }
 
     try argv.append(cfg.raw.tools.wasmtime_path);
@@ -121,6 +119,7 @@ pub fn run(
     // Preopen dirs for each mount
     for (mounts) |mt| {
         const map = try std.fmt.allocPrint(a, "{s}::{s}", .{ mt.host_path, mt.guest_path });
+        try map_strings.append(map);
         try argv.append("--mapdir");
         try argv.append(map);
     }
@@ -142,10 +141,7 @@ pub fn run(
     const deadline_ms = @as(i64, @intCast(m.max_runtime_ms));
     const wait_res = try waitWithTimeout(&child, deadline_ms);
 
-    if (wait_res.timed_out) {
-        _ = child.kill() catch {};
-        return error.ToolTimeout;
-    }
+    if (wait_res.timed_out) return error.ToolTimeout;
 
     // Read bounded outputs
     const stdout_bytes = try readCapped(a, child.stdout.?, m.max_stdout_bytes);
@@ -192,7 +188,6 @@ fn readCapped(a: std.mem.Allocator, file: std.fs.File, cap: usize) ![]u8 {
 const WaitResult = struct { timed_out: bool };
 
 fn waitWithTimeout(child: *std.ChildProcess, max_ms: i64) !WaitResult {
-    // Spawn a thread that waits for completion; main thread sleeps/polls.
     var done = std.atomic.Value(bool).init(false);
 
     const waiter = try std.Thread.spawn(.{}, struct {
@@ -201,14 +196,18 @@ fn waitWithTimeout(child: *std.ChildProcess, max_ms: i64) !WaitResult {
             ctx.done.store(true, .seq_cst);
         }
     }.run, .{ .child = child, .done = &done });
-    waiter.detach();
 
     var waited: i64 = 0;
     const step: i64 = 10;
     while (!done.load(.seq_cst)) {
-        if (waited >= max_ms) return .{ .timed_out = true };
+        if (waited >= max_ms) {
+            _ = child.kill() catch {};
+            waiter.join();
+            return .{ .timed_out = true };
+        }
         std.time.sleep(@as(u64, @intCast(step)) * std.time.ns_per_ms);
         waited += step;
     }
+    waiter.join();
     return .{ .timed_out = false };
 }

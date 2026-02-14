@@ -1,4 +1,5 @@
 const std = @import("std");
+const hash = @import("../obs/hash.zig");
 
 pub const TokenInfo = struct {
     token: []u8,
@@ -17,6 +18,7 @@ pub fn loadOrCreate(a: std.mem.Allocator, workspace_root: []const u8) !TokenInfo
     std.fs.cwd().makePath(dir) catch {};
 
     const path = try std.fs.path.join(a, &.{ dir, "gateway.token" });
+    defer a.free(path);
 
     // Try load
     if (std.fs.cwd().openFile(path, .{})) |file| {
@@ -33,12 +35,8 @@ pub fn loadOrCreate(a: std.mem.Allocator, workspace_root: []const u8) !TokenInfo
         var raw: [32]u8 = undefined;
         std.crypto.random.bytes(&raw);
 
-        var token = try a.alloc(u8, 64);
-        const hex = "0123456789abcdef";
-        for (raw, 0..) |b, i| {
-            token[i*2] = hex[(b >> 4) & 0xF];
-            token[i*2 + 1] = hex[b & 0xF];
-        }
+        const token = try a.alloc(u8, 64);
+        hash.hexBuf(&raw, token);
 
         var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
         defer file.close();

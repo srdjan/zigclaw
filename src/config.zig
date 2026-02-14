@@ -95,8 +95,6 @@ pub const ValidatedConfig = struct {
             a.free(w.message);
         }
         a.free(self.warnings);
-
-        _ = self;
     }
 
     pub fn print(self: ValidatedConfig, w: anytype) !void {
@@ -136,7 +134,7 @@ pub const ValidatedConfig = struct {
         });
     }
 
-    pub fn printNormalizedToml(self: ValidatedConfig, w: anytype) !void {
+    pub fn printNormalizedToml(self: ValidatedConfig, a: std.mem.Allocator, w: anytype) !void {
         // Stable ordering output (minimal TOML). DO NOT print secrets.
         try w.print("config_version = {d}\n\n", .{self.raw.config_version});
 
@@ -146,12 +144,12 @@ pub const ValidatedConfig = struct {
 
         // presets sorted by name
         const presets = self.raw.capabilities.presets;
-        var idxs = try std.heap.page_allocator.alloc(usize, presets.len);
-        defer std.heap.page_allocator.free(idxs);
+        const idxs = try a.alloc(usize, presets.len);
+        defer a.free(idxs);
         for (idxs, 0..) |*p, i| p.* = i;
         std.sort.block(usize, idxs, presets, struct {
-            fn lessThan(presets_: []PresetConfig, a: usize, b: usize) bool {
-                return std.mem.lessThan(u8, presets_[a].name, presets_[b].name);
+            fn lessThan(presets_: []PresetConfig, ai: usize, bi: usize) bool {
+                return std.mem.lessThan(u8, presets_[ai].name, presets_[bi].name);
             }
         }.lessThan);
 
@@ -412,7 +410,7 @@ fn parseArray(a: std.mem.Allocator, t: []const u8) ![]Value {
         if (is_sep or at_end) {
             const part0 = std.mem.trim(u8, inner[start..i], " \t\r");
             if (part0.len > 0) {
-                var v = try parseValue(a, part0);
+                const v = try parseValue(a, part0);
                 try items.append(v);
             }
             start = i + 1;
@@ -436,7 +434,6 @@ const BuildResult = struct {
             a.free(w.message);
         }
         a.free(self.warnings);
-        _ = self;
     }
 };
 

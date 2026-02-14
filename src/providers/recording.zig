@@ -33,8 +33,8 @@ pub const RecordingProvider = struct {
 
             if (path.len > 0) {
                 // if exists, do not overwrite
-                const exists = std.fs.cwd().access(path, .{}) == null;
-                if (!exists) {
+                const file_exists = if (std.fs.cwd().access(path, .{})) |_| true else |_| false;
+                if (!file_exists) {
                     var file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch null;
                     if (file) |*f| {
                         defer f.close();

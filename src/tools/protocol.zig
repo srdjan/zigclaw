@@ -52,15 +52,27 @@ pub fn decodeResponse(a: std.mem.Allocator, bytes: []const u8) !ToolResponseOwne
     defer parsed.deinit();
 
     const v = parsed.value;
+    if (v != .object) return error.MalformedResponse;
     const obj = v.object;
 
-    const req_id = try a.dupe(u8, obj.get("request_id").?.string);
-    const data = try a.dupe(u8, (obj.get("data_json") orelse .{ .string = "" }).string);
-    const out = try a.dupe(u8, (obj.get("stdout") orelse .{ .string = "" }).string);
-    const err = try a.dupe(u8, (obj.get("stderr") orelse .{ .string = "" }).string);
+    const rid_v = obj.get("request_id") orelse return error.MalformedResponse;
+    if (rid_v != .string) return error.MalformedResponse;
+    const req_id = try a.dupe(u8, rid_v.string);
+    errdefer a.free(req_id);
 
-    const ok = obj.get("ok").?.bool;
-    const pv = @as(u32, @intCast(obj.get("protocol_version").?.integer));
+    const data = try a.dupe(u8, if (obj.get("data_json")) |dv| (if (dv == .string) dv.string else "") else "");
+    errdefer a.free(data);
+    const out = try a.dupe(u8, if (obj.get("stdout")) |sv| (if (sv == .string) sv.string else "") else "");
+    errdefer a.free(out);
+    const err = try a.dupe(u8, if (obj.get("stderr")) |ev| (if (ev == .string) ev.string else "") else "");
+
+    const ok_v = obj.get("ok") orelse return error.MalformedResponse;
+    if (ok_v != .bool) return error.MalformedResponse;
+    const ok = ok_v.bool;
+
+    const pv_v = obj.get("protocol_version") orelse return error.MalformedResponse;
+    if (pv_v != .integer) return error.MalformedResponse;
+    const pv = std.math.cast(u32, pv_v.integer) orelse return error.MalformedResponse;
 
     return .{
         .response = .{

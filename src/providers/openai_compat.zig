@@ -40,8 +40,11 @@ pub const OpenAiCompatProvider = struct {
         try headers.append("content-type", "application/json");
         try headers.append("accept", "application/json");
 
-        const api_key = if (self.api_key.len > 0) self.api_key else (std.process.getEnvVarOwned(a, self.api_key_env) catch "");
-        defer if (self.api_key.len == 0 and api_key.len > 0) a.free(api_key);
+        const api_key = if (self.api_key.len > 0)
+            try a.dupe(u8, self.api_key)
+        else
+            (std.process.getEnvVarOwned(a, self.api_key_env) catch try a.dupe(u8, ""));
+        defer a.free(api_key);
 
         if (api_key.len > 0) {
             const auth = try std.fmt.allocPrint(a, "Bearer {s}", .{api_key});

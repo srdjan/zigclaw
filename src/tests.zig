@@ -26,7 +26,7 @@ test "config validate emits stable normalized TOML" {
     var out = std.ArrayList(u8).init(a);
     defer out.deinit();
 
-    try vc.printNormalizedToml(out.writer());
+    try vc.printNormalizedToml(a, out.writer());
 
     const expected = try std.fs.cwd().readFileAlloc(a, "tests/golden/config_normalized.toml", 1024 * 1024);
     defer a.free(expected);
@@ -223,6 +223,12 @@ test "provider fixtures record/replay (stub)" {
     std.fs.cwd().deleteTree(cfg.provider_fixtures.dir) catch {};
 }
 
+const recall = @import("memory/recall.zig");
+const obs_hash = @import("obs/hash.zig");
+const obs_trace = @import("obs/trace.zig");
+const protocol = @import("tools/protocol.zig");
+const diff = @import("util/diff.zig");
+
 const gw_http = @import("gateway/http.zig");
 
 test "gateway http parses request line + headers" {
@@ -266,4 +272,203 @@ test "ToolRunResult toJsonAlloc includes request_id" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"request_id\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") != null);
+}
+
+// ---- recall.zig tests ----
+
+fn freeRecallItems(a: std.mem.Allocator, items: []recall.MemoryItem) void {
+    for (items) |it| {
+        a.free(it.title);
+        a.free(it.snippet);
+    }
+    a.free(items);
+}
+
+test "scoreMarkdown returns empty for empty input" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const items = try recall.scoreMarkdown(a, "", "anything", 5);
+    defer freeRecallItems(a, items);
+    try std.testing.expectEqual(@as(usize, 0), items.len);
+}
+
+test "scoreMarkdown returns empty for non-matching query" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const md = "This is about apples.\n\nThis is about oranges.";
+    const items = try recall.scoreMarkdown(a, md, "bananas", 5);
+    defer freeRecallItems(a, items);
+    try std.testing.expectEqual(@as(usize, 0), items.len);
+}
+
+test "scoreMarkdown scores matching paragraphs" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const md = "Zig is great.\n\nRust is also good.\n\nZig has comptime.";
+    const items = try recall.scoreMarkdown(a, md, "Zig", 5);
+    defer freeRecallItems(a, items);
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    // First result should be "Zig has comptime" or "Zig is great" (both score 1)
+    try std.testing.expect(std.mem.indexOf(u8, items[0].snippet, "Zig") != null);
+}
+
+test "scoreMarkdown respects limit" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const md = "apple pie\n\napple sauce\n\napple cider";
+    const items = try recall.scoreMarkdown(a, md, "apple", 2);
+    defer freeRecallItems(a, items);
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+}
+
+// ---- obs/hash.zig tests ----
+
+test "sha256HexAlloc produces known answer" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    const hex = try obs_hash.sha256HexAlloc(a, "");
+    defer a.free(hex);
+    try std.testing.expectEqualStrings("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", hex);
+}
+
+test "hexAlloc encodes bytes correctly" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const hex = try obs_hash.hexAlloc(a, &[_]u8{ 0xde, 0xad, 0xbe, 0xef });
+    defer a.free(hex);
+    try std.testing.expectEqualStrings("deadbeef", hex);
+}
+
+// ---- obs/trace.zig tests ----
+
+test "newRequestId returns 32 hex chars" {
+    const rid = obs_trace.newRequestId();
+    const s = rid.slice();
+    try std.testing.expectEqual(@as(usize, 32), s.len);
+    for (s) |c| {
+        try std.testing.expect((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'));
+    }
+}
+
+test "newRequestId returns distinct values" {
+    const r1 = obs_trace.newRequestId();
+    const r2 = obs_trace.newRequestId();
+    try std.testing.expect(!std.mem.eql(u8, r1.slice(), r2.slice()));
+}
+
+// ---- tools/protocol.zig tests ----
+
+test "protocol encode/decode round-trip" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const req = protocol.ToolRequest{
+        .request_id = "req-123",
+        .tool = "echo",
+        .args_json = "{\"text\":\"hi\"}",
+        .cwd = "/workspace",
+        .mounts = &.{},
+    };
+
+    const encoded = try protocol.encodeRequest(a, req);
+    defer a.free(encoded);
+
+    // Verify encoded JSON contains expected fields
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"request_id\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "req-123") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "echo") != null);
+}
+
+test "protocol decodeResponse parses valid response" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const json =
+        \\{"protocol_version":0,"request_id":"abc","ok":true,"data_json":"{\"x\":1}","stdout":"out","stderr":""}
+    ;
+
+    var resp = try protocol.decodeResponse(a, json);
+    defer resp.deinit(a);
+
+    try std.testing.expectEqual(@as(u32, 0), resp.response.protocol_version);
+    try std.testing.expectEqualStrings("abc", resp.response.request_id);
+    try std.testing.expect(resp.response.ok);
+    try std.testing.expectEqualStrings("{\"x\":1}", resp.response.data_json);
+    try std.testing.expectEqualStrings("out", resp.response.stdout);
+}
+
+test "protocol decodeResponse rejects missing fields" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    try std.testing.expectError(error.MalformedResponse, protocol.decodeResponse(a, "{}"));
+    try std.testing.expectError(error.MalformedResponse, protocol.decodeResponse(a, "[]"));
+}
+
+// ---- util/diff.zig tests ----
+
+test "diff identical inputs" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const d = try diff.diffTextAlloc(a, "line1\nline2", "line1\nline2");
+    defer a.free(d);
+    try std.testing.expectEqualStrings(" line1\n line2\n", d);
+}
+
+test "diff insertion" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const d = try diff.diffTextAlloc(a, "a", "a\nb");
+    defer a.free(d);
+    try std.testing.expectEqualStrings(" a\n+b\n", d);
+}
+
+test "diff deletion" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const d = try diff.diffTextAlloc(a, "a\nb", "a");
+    defer a.free(d);
+    try std.testing.expectEqualStrings(" a\n-b\n", d);
+}
+
+test "diff modification" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const d = try diff.diffTextAlloc(a, "old", "new");
+    defer a.free(d);
+    try std.testing.expectEqualStrings("-old\n+new\n", d);
+}
+
+test "diff empty inputs" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const d = try diff.diffTextAlloc(a, "", "");
+    defer a.free(d);
+    try std.testing.expectEqualStrings(" \n", d);
 }

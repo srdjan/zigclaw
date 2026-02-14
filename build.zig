@@ -7,9 +7,11 @@ pub fn build(b: *std.Build) void {
     // --- Native executable
     const exe = b.addExecutable(.{
         .name = "zigclaw",
-        .root_source_file = .{ .path = "src/main.zig" },
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     b.installArtifact(exe);
 
@@ -21,9 +23,11 @@ pub fn build(b: *std.Build) void {
 
     // --- Tests
     const tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/tests.zig" },
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -34,26 +38,41 @@ pub fn build(b: *std.Build) void {
         .os_tag = .wasi,
     });
 
+    // Shared plugin SDK module
+    const sdk_mod = b.createModule(.{
+        .root_source_file = b.path("plugins/sdk/protocol.zig"),
+    });
+
     // Build to names with .wasm extension so ToolRunner can locate them easily.
     const plugin_echo = b.addExecutable(.{
         .name = "echo.wasm",
-        .root_source_file = .{ .path = "plugins/echo/src/main.zig" },
-        .target = wasi_target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("plugins/echo/src/main.zig"),
+            .target = wasi_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "plugin_sdk", .module = sdk_mod },
+            },
+        }),
     });
     b.installArtifact(plugin_echo);
 
     const plugin_fs_read = b.addExecutable(.{
         .name = "fs_read.wasm",
-        .root_source_file = .{ .path = "plugins/fs_read/src/main.zig" },
-        .target = wasi_target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("plugins/fs_read/src/main.zig"),
+            .target = wasi_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "plugin_sdk", .module = sdk_mod },
+            },
+        }),
     });
     b.installArtifact(plugin_fs_read);
 
     // Install manifests next to the wasm binaries in zig-out/bin
-    const install_echo_manifest = b.addInstallFileWithDir(.{ .path = "plugins/echo/tool.toml" }, .bin, "echo.toml");
-    const install_fs_read_manifest = b.addInstallFileWithDir(.{ .path = "plugins/fs_read/tool.toml" }, .bin, "fs_read.toml");
+    const install_echo_manifest = b.addInstallFileWithDir(b.path("plugins/echo/tool.toml"), .bin, "echo.toml");
+    const install_fs_read_manifest = b.addInstallFileWithDir(b.path("plugins/fs_read/tool.toml"), .bin, "fs_read.toml");
 
     const s1 = b.step("plugin-echo", "Build/install echo WASI plugin + manifest to zig-out/bin");
     s1.dependOn(&plugin_echo.step);
@@ -64,6 +83,6 @@ pub fn build(b: *std.Build) void {
     s2.dependOn(&install_fs_read_manifest.step);
 
     const s_all = b.step("plugins", "Build/install all WASI plugins + manifests");
-    s_all.dependOn(&s1.step);
-    s_all.dependOn(&s2.step);
+    s_all.dependOn(s1);
+    s_all.dependOn(s2);
 }

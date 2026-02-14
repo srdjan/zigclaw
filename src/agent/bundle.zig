@@ -14,7 +14,6 @@ pub const Bundle = struct {
         a.free(self.system);
         memory_mod.freeRecall(a, self.memory);
         a.free(self.prompt_hash_hex);
-        _ = self;
     }
 };
 
@@ -38,6 +37,7 @@ pub fn build(a: std.mem.Allocator, cfg: config.ValidatedConfig, message: []const
 }
 
 fn computePromptHashHex(a: std.mem.Allocator, system: []const u8, user: []const u8, memory: []const memory_mod.MemoryItem) ![]u8 {
+    const hash = @import("../obs/hash.zig");
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     h.update("system:");
     h.update(system);
@@ -52,14 +52,7 @@ fn computePromptHashHex(a: std.mem.Allocator, system: []const u8, user: []const 
     }
     var digest: [32]u8 = undefined;
     h.final(&digest);
-
-    var out = try a.alloc(u8, 64);
-    const hex = "0123456789abcdef";
-    for (digest, 0..) |b, i| {
-        out[i*2] = hex[(b >> 4) & 0xF];
-        out[i*2 + 1] = hex[b & 0xF];
-    }
-    return out;
+    return hash.hexAlloc(a, &digest);
 }
 
 pub fn dumpJsonAlloc(a: std.mem.Allocator, b: Bundle) ![]u8 {

@@ -106,7 +106,7 @@ fn stringifyJsonValue(a: std.mem.Allocator, v: std.json.Value) ![]u8 {
 }
 
 fn jsonError(a: std.mem.Allocator, status: u16, request_id: []const u8, msg: []const u8) !Resp {
-    const body = try jsonObj(a, .{ .request_id = request_id, .error = msg });
+    const body = try jsonObj(a, .{ .request_id = request_id, .@"error" = msg });
     return .{ .status = status, .body = body };
 }
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const cfg = @import("config.zig");
+const hash_mod = @import("obs/hash.zig");
 
 pub const Mount = struct {
     host_path: []const u8,
@@ -27,7 +28,6 @@ pub const PolicyPlan = struct {
     pub fn deinit(self: *PolicyPlan) void {
         self.allowed_tools.deinit();
         // policy_hash_hex is owned by Policy (freed there)
-        _ = self;
     }
 
     pub fn isToolAllowed(self: *const PolicyPlan, tool: []const u8) bool {
@@ -59,6 +59,7 @@ pub const Policy = struct {
 
     pub fn fromConfig(a: std.mem.Allocator, caps: cfg.CapabilitiesConfig, workspace_root: []const u8) !Policy {
         const ws = try a.dupe(u8, workspace_root);
+        errdefer a.free(ws);
 
         var presets = std.ArrayList(Preset).init(a);
         errdefer {
@@ -70,7 +71,6 @@ pub const Policy = struct {
                 a.free(p.allow_write_paths);
             }
             presets.deinit();
-            a.free(ws);
         }
 
         for (caps.presets) |p0| {
@@ -86,6 +86,16 @@ pub const Policy = struct {
         }
 
         const presets_slice = try presets.toOwnedSlice();
+        errdefer {
+            for (presets_slice) |p| {
+                a.free(p.name);
+                for (p.tools) |t| a.free(t);
+                a.free(p.tools);
+                for (p.allow_write_paths) |w| a.free(w);
+                a.free(p.allow_write_paths);
+            }
+            a.free(presets_slice);
+        }
 
         const active_name = caps.active_preset;
         var active: ?Preset = null;
@@ -197,7 +207,7 @@ fn basename(path: []const u8) []const u8 {
 
 fn computePolicyHashHex(a: std.mem.Allocator, workspace_root: []const u8, active: Preset) ![]const u8 {
     // canonicalize: preset name + sorted tools + sorted write paths + workspace root
-    var tools_idxs = try a.alloc(usize, active.tools.len);
+    const tools_idxs = try a.alloc(usize, active.tools.len);
     defer a.free(tools_idxs);
     for (tools_idxs, 0..) |*p, i| p.* = i;
     std.sort.block(usize, tools_idxs, active.tools, struct {
@@ -206,7 +216,7 @@ fn computePolicyHashHex(a: std.mem.Allocator, workspace_root: []const u8, active
         }
     }.lessThan);
 
-    var write_idxs = try a.alloc(usize, active.allow_write_paths.len);
+    const write_idxs = try a.alloc(usize, active.allow_write_paths.len);
     defer a.free(write_idxs);
     for (write_idxs, 0..) |*p, i| p.* = i;
     std.sort.block(usize, write_idxs, active.allow_write_paths, struct {
@@ -235,13 +245,5 @@ fn computePolicyHashHex(a: std.mem.Allocator, workspace_root: []const u8, active
 
     var digest: [32]u8 = undefined;
     h.final(&digest);
-
-    // hex
-    var out = try a.alloc(u8, 64);
-    const hex = "0123456789abcdef";
-    for (digest, 0..) |b, i| {
-        out[i*2] = hex[(b >> 4) & 0xF];
-        out[i*2 + 1] = hex[b & 0xF];
-    }
-    return out;
+    return hash_mod.hexAlloc(a, &digest);
 }

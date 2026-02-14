@@ -52,28 +52,10 @@ pub fn readRequest(a: std.mem.Allocator, stream: anytype, max_bytes: usize) !Req
     }
 
     const he = header_end.?;
-    const head = buf.items[0..he];
     const after = he + 4;
 
-    var lines_it = std.mem.splitSequence(u8, head, "\r\n");
-    const req_line = lines_it.next() orelse return error.BadRequest;
-    const method, const target = try parseRequestLine(req_line);
-
-    var headers_list = std.ArrayList(Header).init(a);
-    errdefer headers_list.deinit();
-
-    while (lines_it.next()) |ln| {
-        if (ln.len == 0) break;
-        const colon = std.mem.indexOfScalar(u8, ln, ':') orelse continue;
-        const name = std.mem.trim(u8, ln[0..colon], " \t");
-        const value = std.mem.trim(u8, ln[colon+1..], " \t");
-        try headers_list.append(.{ .name = name, .value = value });
-    }
-
-    const headers = try headers_list.toOwnedSlice();
-    errdefer a.free(headers);
-
-    const cl = getContentLength(headers);
+    // Scan content-length directly from raw bytes - avoids allocating headers twice
+    const cl = scanContentLength(buf.items[0..he]);
     while (buf.items.len < after + cl) {
         const n = try stream.read(&tmp);
         if (n == 0) return error.ConnectionClosed;
@@ -131,6 +113,21 @@ fn getContentLength(headers: []const Header) usize {
     for (headers) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
             return std.fmt.parseInt(usize, std.mem.trim(u8, h.value, " \t"), 10) catch 0;
+        }
+    }
+    return 0;
+}
+
+fn scanContentLength(head: []const u8) usize {
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next(); // skip request line
+    while (lines.next()) |ln| {
+        if (ln.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, ln, ':') orelse continue;
+        const name = std.mem.trim(u8, ln[0..colon], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+            const value = std.mem.trim(u8, ln[colon + 1 ..], " \t");
+            return std.fmt.parseInt(usize, value, 10) catch 0;
         }
     }
     return 0;

@@ -3,7 +3,10 @@ const App = @import("app.zig").App;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer {
+        const check = gpa.deinit();
+        if (check == .leak) std.log.err("memory leak detected", .{});
+    }
     const a = gpa.allocator();
 
     const argv = try std.process.argsAlloc(a);
@@ -40,7 +43,7 @@ pub fn main() !void {
             }
 
             if (std.mem.eql(u8, format, "toml")) {
-                try validated.printNormalizedToml(std.io.getStdOut().writer());
+                try validated.printNormalizedToml(a, std.io.getStdOut().writer());
             } else {
                 try validated.print(std.io.getStdOut().writer());
             }
@@ -57,7 +60,7 @@ pub fn main() !void {
         const validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
 
-        try app.runAgent(a, validated, msg);
+        try app.runAgent(validated, msg);
         return;
     }
 
@@ -139,7 +142,7 @@ pub fn main() !void {
             const tool = argv[3];
             const args_json = flagValue(argv, "--args") orelse "{}";
 
-            const res = try app.runTool(a, validated, tool, args_json);
+            const res = try app.runTool(validated, tool, args_json);
             defer res.deinit(a);
 
             const out = try res.toJsonAlloc(a);

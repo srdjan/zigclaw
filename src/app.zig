@@ -16,25 +16,21 @@ pub const App = struct {
     }
 
     pub fn loadConfig(self: *App, path: []const u8) !config_mod.ValidatedConfig {
-        _ = self;
         return try config_mod.loadAndValidate(self.allocator, path);
     }
 
-    pub fn runAgent(self: *App, a: std.mem.Allocator, cfg: config_mod.ValidatedConfig, message: []const u8) !void {
-        _ = self;
-        try agent_loop.run(a, cfg, message);
+    pub fn runAgent(self: *App, cfg: config_mod.ValidatedConfig, message: []const u8) !void {
+        try agent_loop.run(self.allocator, cfg, message);
     }
 
     pub fn runTool(
         self: *App,
-        a: std.mem.Allocator,
         cfg: config_mod.ValidatedConfig,
         tool: []const u8,
         args_json: []const u8,
     ) !tools_runner.ToolRunResult {
-        _ = self;
         const rid = trace.newRequestId();
-        return try tools_runner.run(a, cfg, rid.slice(), tool, args_json);
+        return try tools_runner.run(self.allocator, cfg, rid.slice(), tool, args_json);
     }
 
     pub fn runToolWithRequestId(

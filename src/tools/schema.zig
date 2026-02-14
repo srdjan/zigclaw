@@ -38,18 +38,29 @@ pub fn validateArgs(schema: manifest.ArgSchema, args_json: []const u8) Validatio
             .string => {
                 if (val != .string) return ValidationError.TypeMismatch;
                 const s = val.string;
-                if (p.schema.max_length) |ml| if (s.len > ml) return ValidationError.TooLong;
+                if (p.schema.max_length) |ml| {
+                    if (s.len > ml) return ValidationError.TooLong;
+                }
                 if (p.schema.enum_values.len > 0) {
                     var ok = false;
-                    for (p.schema.enum_values) |ev| if (std.mem.eql(u8, ev, s)) { ok = true; break; }
+                    for (p.schema.enum_values) |ev| {
+                        if (std.mem.eql(u8, ev, s)) {
+                            ok = true;
+                            break;
+                        }
+                    }
                     if (!ok) return ValidationError.NotInEnum;
                 }
             },
             .integer => {
                 if (val != .integer) return ValidationError.TypeMismatch;
                 const i = val.integer;
-                if (p.schema.min_int) |mi| if (i < mi) return ValidationError.OutOfRange;
-                if (p.schema.max_int) |ma| if (i > ma) return ValidationError.OutOfRange;
+                if (p.schema.min_int) |mi| {
+                    if (i < mi) return ValidationError.OutOfRange;
+                }
+                if (p.schema.max_int) |ma| {
+                    if (i > ma) return ValidationError.OutOfRange;
+                }
             },
             .boolean => {
                 if (val != .bool) return ValidationError.TypeMismatch;

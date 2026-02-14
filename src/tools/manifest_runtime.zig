@@ -6,7 +6,7 @@ pub fn listToolsJsonAlloc(a: std.mem.Allocator, plugin_dir: []const u8) ![]u8 {
     defer dir.close();
 
     var tools = std.ArrayList([]const u8).init(a);
-    errdefer {
+    defer {
         for (tools.items) |s| a.free(s);
         tools.deinit();
     }
@@ -33,9 +33,6 @@ pub fn listToolsJsonAlloc(a: std.mem.Allocator, plugin_dir: []const u8) ![]u8 {
     for (tools.items) |t| try stream.write(t);
     try stream.endArray();
     try stream.endObject();
-
-    for (tools.items) |s| a.free(s);
-    tools.deinit();
 
     return try stream.toOwnedSlice();
 }

@@ -38,7 +38,7 @@ fn handleConn(a: std.mem.Allocator, app: *App, cfg: config.ValidatedConfig, conn
     var logger = obs.Logger.fromConfig(cfg);
 
     var req = http.readRequest(a, conn.stream, max) catch |e| {
-        logger.logJson(a, .error, rid.slice(), .{ .error_name = @errorName(e), .context = "gateway.readRequest" });
+        logger.logJson(a, .err, rid.slice(), .{ .error_name = @errorName(e), .context = "gateway.readRequest" });
         const body = try std.fmt.allocPrint(a, "{{\"request_id\":\"{s}\",\"error\":\"{s}\"}}", .{ rid.slice(), @errorName(e) });
         defer a.free(body);
         const hdrs = [_]http.Header{ .{ .name = "x-request-id", .value = rid.slice() } };
@@ -62,7 +62,7 @@ fn handleConn(a: std.mem.Allocator, app: *App, cfg: config.ValidatedConfig, conn
     const ta = arena.allocator();
 
     var r = routes.handle(ta, app, cfg, req, token, rid.slice()) catch |e| {
-        logger.logJson(ta, .error, rid.slice(), .{ .error_name = @errorName(e), .context = "gateway.routes.handle" });
+        logger.logJson(ta, .err, rid.slice(), .{ .error_name = @errorName(e), .context = "gateway.routes.handle" });
         const body = try std.fmt.allocPrint(ta, "{{\"request_id\":\"{s}\",\"error\":\"{s}\"}}", .{ rid.slice(), @errorName(e) });
         const hdrs = [_]http.Header{ .{ .name = "x-request-id", .value = rid.slice() } };
         try http.writeJsonWithHeaders(conn.stream, 500, body, &hdrs);

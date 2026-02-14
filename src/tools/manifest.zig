@@ -165,9 +165,9 @@ fn buildManifest(a: std.mem.Allocator, km: *const KeyMap) !Manifest {
     const description = try getStringDup(a, km, "description");
 
     const requires_network = getBool(km, "requires_network") orelse false;
-    const max_runtime_ms = @as(u32, @intCast(getInt(km, "max_runtime_ms") orelse 2000));
-    const max_stdout_bytes = @as(usize, @intCast(getInt(km, "max_stdout_bytes") orelse 65536));
-    const max_stderr_bytes = @as(usize, @intCast(getInt(km, "max_stderr_bytes") orelse 65536));
+    const max_runtime_ms = if (getInt(km, "max_runtime_ms")) |v| std.math.cast(u32, v) orelse return error.Range else 2000;
+    const max_stdout_bytes = if (getInt(km, "max_stdout_bytes")) |v| std.math.cast(usize, v) orelse return error.Range else 65536;
+    const max_stderr_bytes = if (getInt(km, "max_stderr_bytes")) |v| std.math.cast(usize, v) orelse return error.Range else 65536;
 
     // args.type
     const args_type = try getString(km, "args.type");
@@ -218,7 +218,10 @@ fn buildManifest(a: std.mem.Allocator, km: *const KeyMap) !Manifest {
         defer a.free(max_key);
 
         const max_length = if (getInt(km, max_len_key)) |ml| @as(usize, @intCast(ml)) else null;
-        const enum_values = getStringArrayDup(a, km, enum_key) catch &.{};
+        const enum_values = getStringArrayDup(a, km, enum_key) catch |err| switch (err) {
+            error.MissingKey, error.TypeMismatch => &.{},
+            else => return err,
+        };
         const min_int = getInt(km, min_key);
         const max_int = getInt(km, max_key);
 
@@ -393,7 +396,7 @@ fn parseArray(a: std.mem.Allocator, t: []const u8) ![]Value {
         if (is_sep or at_end) {
             const part0 = std.mem.trim(u8, inner[start..i], " \t\r");
             if (part0.len > 0) {
-                var v = try parseValue(a, part0);
+                const v = try parseValue(a, part0);
                 try items.append(v);
             }
             start = i + 1;

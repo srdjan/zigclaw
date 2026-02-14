@@ -16,7 +16,7 @@ pub fn logDecision(a: std.mem.Allocator, ev: DecisionEvent) !void {
 
     try std.fs.cwd().makePath(dir);
 
-    var file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = false });
     defer file.close();
 
     // append

@@ -149,8 +149,10 @@ fn isIgnoredFile(name: []const u8) bool {
 }
 
 fn normalizeSlashes(a: std.mem.Allocator, p: []const u8) ![]const u8 {
-    var out = try a.dupe(u8, p);
-    for (out) |*c| if (c.* == '\\') c.* = '/';
+    const out = try a.dupe(u8, p);
+    for (out) |*c| {
+        if (c.* == '\\') c.* = '/';
+    }
     return out;
 }
 

@@ -1,11 +1,12 @@
 const std = @import("std");
+const sdk = @import("plugin_sdk");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    const stdin = std.io.getStdIn();
+    const stdin: std.Io.File = .{ .handle = 0, .flags = .{ .nonblocking = false } };
     const input = try stdin.reader().readAllAlloc(a, 1024 * 1024);
     defer a.free(input);
 
@@ -26,33 +27,7 @@ pub fn main() !void {
     const data_json = try std.fmt.allocPrint(a, "{{\"echo\":{s}}}", .{fmtJsonString(text)});
     defer a.free(data_json);
 
-    try writeResp(a, request_id, true, data_json, "echo ok", "");
-}
-
-fn writeResp(
-    a: std.mem.Allocator,
-    request_id: []const u8,
-    ok: bool,
-    data_json: []const u8,
-    stdout_msg: []const u8,
-    stderr_msg: []const u8,
-) !void {
-    var stream = std.json.StringifyStream.init(a);
-    defer stream.deinit();
-
-    try stream.beginObject();
-    try stream.objectField("protocol_version"); try stream.write(@as(u32, 0));
-    try stream.objectField("request_id"); try stream.write(request_id);
-    try stream.objectField("ok"); try stream.write(ok);
-    try stream.objectField("data_json"); try stream.write(data_json);
-    try stream.objectField("stdout"); try stream.write(stdout_msg);
-    try stream.objectField("stderr"); try stream.write(stderr_msg);
-    try stream.endObject();
-
-    const out = try stream.toOwnedSlice();
-    defer a.free(out);
-
-    try std.io.getStdOut().writer().writeAll(out);
+    try sdk.writeResp(a, request_id, true, data_json, "echo ok", "");
 }
 
 fn fmtJsonString(s: []const u8) JsonStringFmt {

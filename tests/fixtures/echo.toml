@@ -1,0 +1,15 @@
+tool_name = "echo"
+version = "0.1.0"
+description = "Echo back a text field"
+requires_network = false
+max_runtime_ms = 2000
+max_stdout_bytes = 65536
+max_stderr_bytes = 65536
+
+[args]
+type = "object"
+required = ["text"]
+
+[args.properties.text]
+type = "string"
+max_length = 1024

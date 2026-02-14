@@ -1,0 +1,49 @@
+# zigclaw.toml
+config_version = 1
+
+[capabilities]
+active_preset = "dev"
+
+[capabilities.presets.readonly]
+tools = ["echo"]
+allow_network = false
+allow_write_paths = []
+
+[capabilities.presets.dev]
+tools = ["echo", "fs_read"]
+allow_network = true
+allow_write_paths = ["./.zigclaw", "./tmp"]
+
+[security]
+workspace_root = "."
+max_request_bytes = 262144
+
+[providers.primary]
+kind = "stub"                # "stub" | "openai_compat"
+model = "gpt-4.1-mini"
+temperature = 0.2
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.fixtures]
+mode = "off"                 # "off" | "record" | "replay"
+dir = "./.zigclaw/fixtures"
+
+[providers.reliable]
+retries = 0
+backoff_ms = 250
+
+[memory]
+backend = "markdown"
+root = "./.zigclaw/memory"
+
+[tools]
+wasmtime_path = "wasmtime"
+plugin_dir = "./zig-out/bin"
+
+
+[observability]
+enabled = true
+dir = "./.zigclaw/logs"
+max_file_bytes = 1048576
+max_files = 5

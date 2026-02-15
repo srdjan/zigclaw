@@ -1,0 +1,20 @@
+tool_name = "http_fetch"
+version = "0.1.0"
+description = "Fetch content from a URL using HTTP GET or POST. Only http:// and https:// URLs are permitted."
+requires_network = true
+native = true
+max_runtime_ms = 30000
+max_stdout_bytes = 262144
+max_stderr_bytes = 65536
+
+[args]
+type = "object"
+required = ["url"]
+
+[args.properties.url]
+type = "string"
+max_length = 4096
+
+[args.properties.method]
+type = "string"
+enum = ["GET", "POST"]

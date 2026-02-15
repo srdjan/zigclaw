@@ -1,0 +1,19 @@
+tool_name = "fs_write"
+version = "0.1.0"
+description = "Write content to a file in a writable sandbox directory"
+requires_network = false
+max_runtime_ms = 4000
+max_stdout_bytes = 65536
+max_stderr_bytes = 65536
+
+[args]
+type = "object"
+required = ["path", "content"]
+
+[args.properties.path]
+type = "string"
+max_length = 2048
+
+[args.properties.content]
+type = "string"
+max_length = 1048576

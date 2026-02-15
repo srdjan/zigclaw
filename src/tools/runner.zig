@@ -90,42 +90,50 @@ pub fn run(
     const mounts = try cfg.policy.makeMounts(a);
     defer freeMounts(a, mounts);
 
+    // For native tools, pass the actual host workspace root as cwd
+    const cwd = if (m.native) cfg.raw.security.workspace_root else "/workspace";
+
     const req = protocol.ToolRequest{
         .request_id = request_id,
         .tool = tool,
         .args_json = args_json,
-        .cwd = "/workspace",
+        .cwd = cwd,
         .mounts = mounts,
     };
 
     const payload = try protocol.encodeRequest(a, req);
     defer a.free(payload);
 
-    // Locate plugin wasm: <plugin_dir>/<tool>.wasm
-    const plugin_path = try std.fmt.allocPrint(a, "{s}/{s}.wasm", .{ cfg.raw.tools.plugin_dir, tool });
-    defer a.free(plugin_path);
-
-    // Build argv: wasmtime --mapdir HOST::GUEST ... <plugin.wasm>
+    // Build argv: depends on whether this is a native tool or WASI plugin
     var argv = std.array_list.Managed([]const u8).init(a);
     defer argv.deinit();
 
-    // Track heap-allocated map strings separately for correct cleanup
-    var map_strings = std.array_list.Managed([]u8).init(a);
+    // Track heap-allocated strings for correct cleanup
+    var alloc_strings = std.array_list.Managed([]u8).init(a);
     defer {
-        for (map_strings.items) |s| a.free(s);
-        map_strings.deinit();
+        for (alloc_strings.items) |s| a.free(s);
+        alloc_strings.deinit();
     }
 
-    try argv.append(cfg.raw.tools.wasmtime_path);
+    if (m.native) {
+        // Native tool: run the host binary directly
+        const plugin_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ cfg.raw.tools.plugin_dir, tool });
+        try alloc_strings.append(plugin_path);
+        try argv.append(plugin_path);
+    } else {
+        // WASI plugin: run through wasmtime with preopened directories
+        const plugin_path = try std.fmt.allocPrint(a, "{s}/{s}.wasm", .{ cfg.raw.tools.plugin_dir, tool });
+        try alloc_strings.append(plugin_path);
 
-    // Preopen dirs for each mount
-    for (mounts) |mt| {
-        const map = try std.fmt.allocPrint(a, "{s}::{s}", .{ mt.host_path, mt.guest_path });
-        try map_strings.append(map);
-        try argv.append("--mapdir");
-        try argv.append(map);
+        try argv.append(cfg.raw.tools.wasmtime_path);
+        for (mounts) |mt| {
+            const map = try std.fmt.allocPrint(a, "{s}::{s}", .{ mt.host_path, mt.guest_path });
+            try alloc_strings.append(map);
+            try argv.append("--mapdir");
+            try argv.append(map);
+        }
+        try argv.append(plugin_path);
     }
-    try argv.append(plugin_path);
 
     var child = try std.process.spawn(io, .{
         .argv = argv.items,

@@ -44,6 +44,7 @@ pub const Manifest = struct {
     version: []const u8,
     description: []const u8,
     requires_network: bool,
+    native: bool, // true = host binary, false = WASI plugin (default)
     max_runtime_ms: u32,
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
@@ -59,6 +60,7 @@ pub const Manifest = struct {
         try stream.objectField("version"); try stream.write(self.version);
         try stream.objectField("description"); try stream.write(self.description);
         try stream.objectField("requires_network"); try stream.write(self.requires_network);
+        try stream.objectField("native"); try stream.write(self.native);
         try stream.objectField("max_runtime_ms"); try stream.write(self.max_runtime_ms);
         try stream.objectField("max_stdout_bytes"); try stream.write(self.max_stdout_bytes);
         try stream.objectField("max_stderr_bytes"); try stream.write(self.max_stderr_bytes);
@@ -167,6 +169,7 @@ fn buildManifest(a: std.mem.Allocator, km: *const KeyMap) !Manifest {
     const description = try getStringDup(a, km, "description");
 
     const requires_network = getBool(km, "requires_network") orelse false;
+    const native = getBool(km, "native") orelse false;
     const max_runtime_ms = if (getInt(km, "max_runtime_ms")) |v| std.math.cast(u32, v) orelse return error.Range else 2000;
     const max_stdout_bytes = if (getInt(km, "max_stdout_bytes")) |v| std.math.cast(usize, v) orelse return error.Range else 65536;
     const max_stderr_bytes = if (getInt(km, "max_stderr_bytes")) |v| std.math.cast(usize, v) orelse return error.Range else 65536;
@@ -251,6 +254,7 @@ fn buildManifest(a: std.mem.Allocator, km: *const KeyMap) !Manifest {
         .version = version,
         .description = description,
         .requires_network = requires_network,
+        .native = native,
         .max_runtime_ms = max_runtime_ms,
         .max_stdout_bytes = max_stdout_bytes,
         .max_stderr_bytes = max_stderr_bytes,

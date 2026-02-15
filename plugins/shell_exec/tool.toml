@@ -1,0 +1,16 @@
+tool_name = "shell_exec"
+version = "0.1.0"
+description = "Execute a command on the host and return stdout/stderr. Commands are validated against a safe character allowlist. No shell metacharacters (pipes, redirections, semicolons) are permitted."
+requires_network = false
+native = true
+max_runtime_ms = 30000
+max_stdout_bytes = 262144
+max_stderr_bytes = 65536
+
+[args]
+type = "object"
+required = ["command"]
+
+[args.properties.command]
+type = "string"
+max_length = 4096

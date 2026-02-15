@@ -5,6 +5,7 @@ const http = @import("http.zig");
 const pairing = @import("../security/pairing.zig");
 const tools_rt = @import("../tools/manifest_runtime.zig");
 const agent_loop = @import("../agent/loop.zig");
+const queue_worker = @import("../queue/worker.zig");
 
 pub const Resp = struct {
     status: u16,
@@ -16,7 +17,9 @@ pub const Resp = struct {
 };
 
 pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.ValidatedConfig, req: http.RequestOwned, token: []const u8, request_id: []const u8) !Resp {
-    if (std.mem.eql(u8, req.target, "/health")) {
+    const path, const query = splitTarget(req.target);
+
+    if (std.mem.eql(u8, path, "/health")) {
         const body = try jsonObj(a, .{
             .request_id = request_id,
             .ok = true,
@@ -29,15 +32,15 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         return try jsonError(a, 401, request_id, "missing/invalid Authorization Bearer token");
     }
 
-    if (std.mem.eql(u8, req.method, "GET") and std.mem.eql(u8, req.target, "/v1/tools")) {
+    if (std.mem.eql(u8, req.method, "GET") and std.mem.eql(u8, path, "/v1/tools")) {
         const tools_json = try tools_rt.listToolsJsonAlloc(a, io, cfg.raw.tools.plugin_dir);
         defer a.free(tools_json);
         const body = try jsonObj(a, .{ .request_id = request_id, .tools_json = tools_json });
         return .{ .status = 200, .body = body };
     }
 
-    if (std.mem.eql(u8, req.method, "GET") and std.mem.startsWith(u8, req.target, "/v1/tools/")) {
-        const tool = req.target["/v1/tools/".len..];
+    if (std.mem.eql(u8, req.method, "GET") and std.mem.startsWith(u8, path, "/v1/tools/")) {
+        const tool = path["/v1/tools/".len..];
         if (tool.len == 0) return try jsonError(a, 400, request_id, "tool name required");
         const manifest_json = try tools_rt.describeToolJsonAlloc(a, io, cfg.raw.tools.plugin_dir, tool);
         defer a.free(manifest_json);
@@ -45,7 +48,7 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         return .{ .status = 200, .body = body };
     }
 
-    if (std.mem.eql(u8, req.method, "POST") and std.mem.eql(u8, req.target, "/v1/tools/run")) {
+    if (std.mem.eql(u8, req.method, "POST") and std.mem.eql(u8, path, "/v1/tools/run")) {
         const parsed = std.json.parseFromSlice(std.json.Value, a, req.body, .{}) catch return jsonError(a, 400, request_id, "invalid JSON");
         defer parsed.deinit();
 
@@ -70,7 +73,49 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         return .{ .status = 200, .body = body };
     }
 
-    if (std.mem.eql(u8, req.method, "POST") and std.mem.eql(u8, req.target, "/v1/agent")) {
+    if (std.mem.eql(u8, req.method, "POST") and std.mem.eql(u8, path, "/v1/agent/enqueue")) {
+        const parsed = std.json.parseFromSlice(std.json.Value, a, req.body, .{}) catch return jsonError(a, 400, request_id, "invalid JSON");
+        defer parsed.deinit();
+
+        const obj = parsed.value.object;
+        const msg_v = obj.get("message") orelse return jsonError(a, 400, request_id, "missing 'message'");
+        if (msg_v != .string) return jsonError(a, 400, request_id, "'message' must be string");
+        const msg = msg_v.string;
+
+        const req_id: ?[]const u8 = if (obj.get("request_id")) |rid_v| switch (rid_v) {
+            .string => |s| s,
+            else => return jsonError(a, 400, request_id, "'request_id' must be string"),
+        } else null;
+
+        const agent_id: ?[]const u8 = if (obj.get("agent_id")) |aid_v| switch (aid_v) {
+            .string => |s| s,
+            else => return jsonError(a, 400, request_id, "'agent_id' must be string"),
+        } else null;
+
+        const queued_id = queue_worker.enqueueAgent(a, io, cfg, msg, agent_id, req_id) catch |e| switch (e) {
+            error.InvalidArgs => return jsonError(a, 400, request_id, @errorName(e)),
+            error.DuplicateRequestId => return jsonError(a, 409, request_id, @errorName(e)),
+            else => return jsonError(a, 500, request_id, @errorName(e)),
+        };
+        defer a.free(queued_id);
+
+        const body = try jsonObj(a, .{ .request_id = queued_id, .queued = true });
+        return .{ .status = 202, .body = body };
+    }
+
+    if (std.mem.eql(u8, req.method, "GET") and std.mem.startsWith(u8, path, "/v1/requests/")) {
+        const rid = path["/v1/requests/".len..];
+        if (rid.len == 0) return try jsonError(a, 400, request_id, "request id required");
+
+        const include_payload = queryHasTruthy(query, "include_payload");
+        const body = queue_worker.statusJsonAlloc(a, io, cfg, rid, include_payload) catch |e| switch (e) {
+            error.InvalidArgs => return jsonError(a, 400, request_id, @errorName(e)),
+            else => return jsonError(a, 500, request_id, @errorName(e)),
+        };
+        return .{ .status = 200, .body = body };
+    }
+
+    if (std.mem.eql(u8, req.method, "POST") and std.mem.eql(u8, path, "/v1/agent")) {
         const parsed = std.json.parseFromSlice(std.json.Value, a, req.body, .{}) catch return jsonError(a, 400, request_id, "invalid JSON");
         defer parsed.deinit();
 
@@ -120,3 +165,27 @@ fn jsonObj(a: std.mem.Allocator, payload: anytype) ![]u8 {
     return try aw.toOwnedSlice();
 }
 
+fn splitTarget(target: []const u8) struct { []const u8, ?[]const u8 } {
+    if (std.mem.indexOfScalar(u8, target, '?')) |i| {
+        return .{ target[0..i], target[i + 1 ..] };
+    }
+    return .{ target, null };
+}
+
+fn queryHasTruthy(query: ?[]const u8, key: []const u8) bool {
+    const q = query orelse return false;
+    var it = std.mem.splitScalar(u8, q, '&');
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        const eq = std.mem.indexOfScalar(u8, part, '=');
+        const k = if (eq) |i| part[0..i] else part;
+        const v = if (eq) |i| part[i + 1 ..] else "";
+        if (!std.mem.eql(u8, k, key)) continue;
+        if (v.len == 0) return true;
+        if (std.mem.eql(u8, v, "1")) return true;
+        if (std.ascii.eqlIgnoreCase(v, "true")) return true;
+        if (std.ascii.eqlIgnoreCase(v, "yes")) return true;
+        return false;
+    }
+    return false;
+}

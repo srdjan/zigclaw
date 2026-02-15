@@ -171,10 +171,12 @@ fn reasonPhrase(code: u16) []const u8 {
     return switch (code) {
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
         500 => "Internal Server Error",

@@ -551,8 +551,35 @@ const obs_hash = @import("obs/hash.zig");
 const obs_trace = @import("obs/trace.zig");
 const protocol = @import("tools/protocol.zig");
 const diff = @import("util/diff.zig");
+const app_mod = @import("app.zig");
 
 const gw_http = @import("gateway/http.zig");
+const gw_routes = @import("gateway/routes.zig");
+
+fn makeGatewayRequest(
+    a: std.mem.Allocator,
+    method: []const u8,
+    target: []const u8,
+    token: ?[]const u8,
+    body: []const u8,
+) !gw_http.RequestOwned {
+    const auth_line = if (token) |t|
+        try std.fmt.allocPrint(a, "Authorization: Bearer {s}\r\n", .{t})
+    else
+        try a.dupe(u8, "");
+    defer a.free(auth_line);
+
+    const raw_const = try std.fmt.allocPrint(
+        a,
+        "{s} {s} HTTP/1.1\r\nHost: localhost\r\n{s}Content-Length: {d}\r\n\r\n{s}",
+        .{ method, target, auth_line, body.len, body },
+    );
+    defer a.free(raw_const);
+
+    const raw = try a.dupe(u8, raw_const);
+    errdefer a.free(raw);
+    return gw_http.parseFromRaw(a, raw);
+}
 
 test "gateway http parses request line + headers" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -577,6 +604,95 @@ test "gateway http parses request line + headers" {
     try std.testing.expectEqualStrings("/health", req.target);
     try std.testing.expect(req.header("host") != null);
     try std.testing.expectEqual(@as(usize, 0), req.contentLength());
+}
+
+test "gateway async queue routes enqueue, conflict, and status" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_gateway_queue";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.observability.enabled = false;
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    const token = "tok_gateway";
+    const enqueue_body = "{\"message\":\"hello async\",\"request_id\":\"gw_req_1\"}";
+
+    var req_enqueue = try makeGatewayRequest(a, "POST", "/v1/agent/enqueue", token, enqueue_body);
+    defer req_enqueue.deinit(a);
+    var resp_enqueue = try gw_routes.handle(a, io, &app, vcq, req_enqueue, token, "http_req_1");
+    defer resp_enqueue.deinit(a);
+
+    try std.testing.expectEqual(@as(u16, 202), resp_enqueue.status);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_enqueue.body, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const rid = obj.get("request_id") orelse return error.BadGolden;
+        try std.testing.expect(rid == .string);
+        try std.testing.expectEqualStrings("gw_req_1", rid.string);
+        const queued = obj.get("queued") orelse return error.BadGolden;
+        try std.testing.expect(queued == .bool);
+        try std.testing.expect(queued.bool);
+    }
+
+    var req_dupe = try makeGatewayRequest(a, "POST", "/v1/agent/enqueue", token, enqueue_body);
+    defer req_dupe.deinit(a);
+    var resp_dupe = try gw_routes.handle(a, io, &app, vcq, req_dupe, token, "http_req_2");
+    defer resp_dupe.deinit(a);
+    try std.testing.expectEqual(@as(u16, 409), resp_dupe.status);
+
+    var req_status_q = try makeGatewayRequest(a, "GET", "/v1/requests/gw_req_1", token, "");
+    defer req_status_q.deinit(a);
+    var resp_status_q = try gw_routes.handle(a, io, &app, vcq, req_status_q, token, "http_req_3");
+    defer resp_status_q.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_status_q.status);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_status_q.body, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const state = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state == .string);
+        try std.testing.expectEqualStrings("queued", state.string);
+    }
+
+    try queue_worker.runWorker(a, io, vcq, .{ .once = true });
+
+    var req_status_done = try makeGatewayRequest(a, "GET", "/v1/requests/gw_req_1?include_payload=1", token, "");
+    defer req_status_done.deinit(a);
+    var resp_status_done = try gw_routes.handle(a, io, &app, vcq, req_status_done, token, "http_req_4");
+    defer resp_status_done.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_status_done.status);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_status_done.body, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const state = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state == .string);
+        try std.testing.expectEqualStrings("completed", state.string);
+        const result = obj.get("result_json") orelse return error.BadGolden;
+        try std.testing.expect(result == .string);
+        try std.testing.expect(std.mem.indexOf(u8, result.string, "\"ok\":true") != null);
+    }
 }
 
 test "ToolRunResult toJsonAlloc includes request_id" {

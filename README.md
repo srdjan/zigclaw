@@ -193,6 +193,18 @@ TOKEN="... printed ..."
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/tools
 ```
 
+Async queue flow via gateway:
+```sh
+TOKEN="... printed ..."
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"summarize this","request_id":"req_demo_1"}' \
+  http://127.0.0.1:8787/v1/agent/enqueue
+
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8787/v1/requests/req_demo_1
+```
+
 
 ## Observability (audit log)
 

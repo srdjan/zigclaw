@@ -11,36 +11,37 @@ pub const TokenInfo = struct {
     }
 };
 
-pub fn loadOrCreate(a: std.mem.Allocator, workspace_root: []const u8) !TokenInfo {
+pub fn loadOrCreate(a: std.mem.Allocator, io: std.Io, workspace_root: []const u8) !TokenInfo {
     const dir = try std.fs.path.join(a, &.{ workspace_root, ".zigclaw" });
     defer a.free(dir);
 
-    std.fs.cwd().makePath(dir) catch {};
+    std.Io.Dir.cwd().createDirPath(io, dir) catch {};
 
     const path = try std.fs.path.join(a, &.{ dir, "gateway.token" });
     defer a.free(path);
 
     // Try load
-    if (std.fs.cwd().openFile(path, .{})) |file| {
-        defer file.close();
-        const bytes = try file.readToEndAlloc(a, 4096);
-        errdefer a.free(bytes);
+    if (std.Io.Dir.cwd().readFileAlloc(io, path, a, std.Io.Limit.limited(4096))) |bytes| {
+        defer a.free(bytes);
 
         const token_trim = std.mem.trim(u8, bytes, " \t\r\n");
         const token = try a.dupe(u8, token_trim);
-        a.free(bytes);
         return .{ .token = token, .path = try a.dupe(u8, path) };
     } else |_| {
         // create
         var raw: [32]u8 = undefined;
-        std.crypto.random.bytes(&raw);
+        io.random(&raw);
 
         const token = try a.alloc(u8, 64);
         hash.hexBuf(&raw, token);
 
-        var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
-        try file.writer().print("{s}\n", .{token});
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer file.close(io);
+
+        var fbuf: [4096]u8 = undefined;
+        var fw = file.writer(io, &fbuf);
+        try fw.interface.print("{s}\n", .{token});
+        try fw.flush();
 
         return .{ .token = token, .path = try a.dupe(u8, path) };
     }

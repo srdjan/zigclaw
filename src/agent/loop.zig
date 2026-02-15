@@ -5,9 +5,9 @@ const bundle = @import("bundle.zig");
 const obs = @import("../obs/logger.zig");
 const trace = @import("../obs/trace.zig");
 
-pub fn run(a: std.mem.Allocator, cfg: config.ValidatedConfig, message: []const u8) !void {
-    const rid = trace.newRequestId();
-    var logger = obs.Logger.fromConfig(cfg);
+pub fn run(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, message: []const u8) !void {
+    const rid = trace.newRequestId(io);
+    var logger = obs.Logger.fromConfig(cfg, io);
 
     var provider = try provider_factory.build(a, cfg);
     defer provider.deinit(a);
@@ -16,7 +16,7 @@ pub fn run(a: std.mem.Allocator, cfg: config.ValidatedConfig, message: []const u
     defer arena.deinit();
     const ta = arena.allocator();
 
-    var b = try bundle.build(ta, cfg, message);
+    var b = try bundle.build(ta, io, cfg, message);
     defer b.deinit(ta);
 
     logger.logJson(ta, .agent_run, rid.slice(), .{
@@ -32,7 +32,7 @@ pub fn run(a: std.mem.Allocator, cfg: config.ValidatedConfig, message: []const u
         .status = "start",
     });
 
-    const resp = provider.chat(ta, .{
+    const resp = provider.chat(ta, io, .{
         .system = b.system,
         .user = message,
         .model = cfg.raw.provider_primary.model,
@@ -56,5 +56,8 @@ pub fn run(a: std.mem.Allocator, cfg: config.ValidatedConfig, message: []const u
         .bytes_out = resp.content.len,
     });
 
-    try std.io.getStdOut().writer().print("request_id={s}\n{s}\n", .{ rid.slice(), resp.content });
+    var obuf: [4096]u8 = undefined;
+    var ow = std.Io.File.stdout().writer(io, &obuf);
+    try ow.interface.print("request_id={s}\n{s}\n", .{ rid.slice(), resp.content });
+    try ow.flush();
 }

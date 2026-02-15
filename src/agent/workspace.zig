@@ -28,11 +28,11 @@ pub const ScanOptions = struct {
     max_file_bytes: u64 = 256 * 1024,
 };
 
-pub fn scan(a: std.mem.Allocator, workspace_root: []const u8, opts: ScanOptions) !WorkspaceSnapshot {
+pub fn scan(a: std.mem.Allocator, io: std.Io, workspace_root: []const u8, opts: ScanOptions) !WorkspaceSnapshot {
     const root_dupe = try a.dupe(u8, workspace_root);
 
     // Collect all file rel paths first
-    var paths = std.ArrayList([]const u8).init(a);
+    var paths = std.array_list.Managed([]const u8).init(a);
     errdefer {
         for (paths.items) |p| a.free(p);
         paths.deinit();
@@ -41,7 +41,7 @@ pub fn scan(a: std.mem.Allocator, workspace_root: []const u8, opts: ScanOptions)
 
     var skipped_large: usize = 0;
 
-    try walkCollect(a, workspace_root, "", &paths);
+    try walkCollect(a, io, workspace_root, "", &paths);
 
     // stable sort
     std.sort.block([]const u8, paths.items, {}, struct {
@@ -52,7 +52,7 @@ pub fn scan(a: std.mem.Allocator, workspace_root: []const u8, opts: ScanOptions)
 
     // Build entries up to max_files (stable)
     const take = @min(opts.max_files, paths.items.len);
-    var files = std.ArrayList(FileEntry).init(a);
+    var files = std.array_list.Managed(FileEntry).init(a);
     errdefer {
         for (files.items) |*f| f.deinit(a);
         files.deinit();
@@ -65,8 +65,7 @@ pub fn scan(a: std.mem.Allocator, workspace_root: []const u8, opts: ScanOptions)
         const full = try std.fs.path.join(a, &.{ workspace_root, rel });
         defer a.free(full);
 
-        const st = std.fs.cwd().statFile(full) catch |e| {
-            _ = e;
+        const st = std.Io.Dir.cwd().statFile(io, full, .{}) catch {
             continue;
         };
 
@@ -75,7 +74,7 @@ pub fn scan(a: std.mem.Allocator, workspace_root: []const u8, opts: ScanOptions)
             continue;
         }
 
-        const hash_hex = try sha256FileHex(a, full);
+        const hash_hex = try sha256FileHex(a, io, full);
         try files.append(.{
             .rel_path = try a.dupe(u8, rel),
             .size = st.size,
@@ -94,18 +93,18 @@ pub fn scan(a: std.mem.Allocator, workspace_root: []const u8, opts: ScanOptions)
     };
 }
 
-fn walkCollect(a: std.mem.Allocator, workspace_root: []const u8, rel_prefix: []const u8, out: *std.ArrayList([]const u8)) !void {
+fn walkCollect(a: std.mem.Allocator, io: std.Io, workspace_root: []const u8, rel_prefix: []const u8, out: *std.array_list.Managed([]const u8)) !void {
     const dir_path = if (rel_prefix.len == 0)
         workspace_root
     else
         try std.fs.path.join(a, &.{ workspace_root, rel_prefix });
     defer if (rel_prefix.len != 0) a.free(dir_path);
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return;
+    defer dir.close(io);
 
     var it = dir.iterate();
-    while (try it.next()) |e| {
+    while (try it.next(io)) |e| {
         const name = e.name;
 
         if (e.kind == .directory) {
@@ -116,7 +115,7 @@ fn walkCollect(a: std.mem.Allocator, workspace_root: []const u8, rel_prefix: []c
                 try std.fs.path.join(a, &.{ rel_prefix, name });
             defer a.free(next_rel);
 
-            try walkCollect(a, workspace_root, next_rel, out);
+            try walkCollect(a, io, workspace_root, next_rel, out);
             continue;
         }
 
@@ -156,25 +155,20 @@ fn normalizeSlashes(a: std.mem.Allocator, p: []const u8) ![]const u8 {
     return out;
 }
 
-fn sha256FileHex(a: std.mem.Allocator, path: []const u8) ![]const u8 {
-    var file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+fn sha256FileHex(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, path, a, std.Io.Limit.limited(256 * 1024));
+    defer a.free(content);
 
     var h = std.crypto.hash.sha2.Sha256.init(.{});
-    var buf: [8192]u8 = undefined;
-    while (true) {
-        const n = try file.reader().read(&buf);
-        if (n == 0) break;
-        h.update(buf[0..n]);
-    }
+    h.update(content);
     var digest: [32]u8 = undefined;
     h.final(&digest);
 
     var out = try a.alloc(u8, 64);
     const hex = "0123456789abcdef";
     for (digest, 0..) |b, i| {
-        out[i*2] = hex[(b >> 4) & 0xF];
-        out[i*2 + 1] = hex[b & 0xF];
+        out[i * 2] = hex[(b >> 4) & 0xF];
+        out[i * 2 + 1] = hex[b & 0xF];
     }
     return out;
 }

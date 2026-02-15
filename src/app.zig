@@ -6,9 +6,10 @@ const trace = @import("obs/trace.zig");
 
 pub const App = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
 
-    pub fn init(a: std.mem.Allocator) !App {
-        return .{ .allocator = a };
+    pub fn init(a: std.mem.Allocator, io: std.Io) !App {
+        return .{ .allocator = a, .io = io };
     }
 
     pub fn deinit(self: *App) void {
@@ -16,11 +17,11 @@ pub const App = struct {
     }
 
     pub fn loadConfig(self: *App, path: []const u8) !config_mod.ValidatedConfig {
-        return try config_mod.loadAndValidate(self.allocator, path);
+        return try config_mod.loadAndValidate(self.allocator, self.io, path);
     }
 
     pub fn runAgent(self: *App, cfg: config_mod.ValidatedConfig, message: []const u8) !void {
-        try agent_loop.run(self.allocator, cfg, message);
+        try agent_loop.run(self.allocator, self.io, cfg, message);
     }
 
     pub fn runTool(
@@ -29,8 +30,8 @@ pub const App = struct {
         tool: []const u8,
         args_json: []const u8,
     ) !tools_runner.ToolRunResult {
-        const rid = trace.newRequestId();
-        return try tools_runner.run(self.allocator, cfg, rid.slice(), tool, args_json);
+        const rid = trace.newRequestId(self.io);
+        return try tools_runner.run(self.allocator, self.io, cfg, rid.slice(), tool, args_json);
     }
 
     pub fn runToolWithRequestId(
@@ -41,7 +42,6 @@ pub const App = struct {
         tool: []const u8,
         args_json: []const u8,
     ) !tools_runner.ToolRunResult {
-        _ = self;
-        return try tools_runner.run(a, cfg, request_id, tool, args_json);
+        return try tools_runner.run(a, self.io, cfg, request_id, tool, args_json);
     }
 };

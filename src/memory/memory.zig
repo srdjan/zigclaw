@@ -9,10 +9,10 @@ pub const MemoryBackend = union(enum) {
     markdown: md.MarkdownMemory,
     // sqlite: ... (later)
 
-    pub fn fromConfig(a: std.mem.Allocator, cfg: config.MemoryConfig) !MemoryBackend {
+    pub fn fromConfig(a: std.mem.Allocator, io: std.Io, cfg: config.MemoryConfig) !MemoryBackend {
         return switch (cfg.backend) {
-            .markdown => .{ .markdown = try md.MarkdownMemory.init(a, cfg.root) },
-            .sqlite => .{ .markdown = try md.MarkdownMemory.init(a, cfg.root) }, // fallback for scaffold
+            .markdown => .{ .markdown = try md.MarkdownMemory.init(a, io, cfg.root) },
+            .sqlite => .{ .markdown = try md.MarkdownMemory.init(a, io, cfg.root) }, // fallback for scaffold
         };
     }
 
@@ -22,9 +22,9 @@ pub const MemoryBackend = union(enum) {
         }
     }
 
-    pub fn recall(self: *MemoryBackend, a: std.mem.Allocator, query: []const u8, limit: usize) ![]MemoryItem {
+    pub fn recall(self: *MemoryBackend, a: std.mem.Allocator, io: std.Io, query: []const u8, limit: usize) ![]MemoryItem {
         return switch (self.*) {
-            .markdown => |*m| m.recall(a, query, limit),
+            .markdown => |*m| m.recall(a, io, query, limit),
         };
     }
 };

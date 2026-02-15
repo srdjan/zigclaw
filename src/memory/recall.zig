@@ -15,7 +15,7 @@ pub fn empty(a: std.mem.Allocator) ![]MemoryItem {
 /// - counts query token occurrences
 /// - returns top-N snippets
 pub fn scoreMarkdown(a: std.mem.Allocator, md: []const u8, query: []const u8, limit: usize) ![]MemoryItem {
-    var tokens = std.ArrayList([]const u8).init(a);
+    var tokens = std.array_list.Managed([]const u8).init(a);
     defer tokens.deinit();
 
     // tokenize query by whitespace
@@ -25,7 +25,7 @@ pub fn scoreMarkdown(a: std.mem.Allocator, md: []const u8, query: []const u8, li
         if (tt.len > 0) try tokens.append(tt);
     }
 
-    var items = std.ArrayList(MemoryItem).init(a);
+    var items = std.array_list.Managed(MemoryItem).init(a);
     errdefer {
         for (items.items) |it| { a.free(it.title); a.free(it.snippet); }
         items.deinit();
@@ -63,7 +63,7 @@ pub fn scoreMarkdown(a: std.mem.Allocator, md: []const u8, query: []const u8, li
 
     // trim
     while (items.items.len > n) {
-        const itrm = items.pop();
+        const itrm = items.pop().?;
         a.free(itrm.title);
         a.free(itrm.snippet);
     }

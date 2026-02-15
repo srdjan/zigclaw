@@ -50,8 +50,9 @@ pub const Manifest = struct {
     args: ArgSchema,
 
     pub fn toJsonAlloc(self: Manifest, a: std.mem.Allocator) ![]u8 {
-        var stream = std.json.StringifyStream.init(a);
-        defer stream.deinit();
+        var aw: std.Io.Writer.Allocating = .init(a);
+        defer aw.deinit();
+        var stream: std.json.Stringify = .{ .writer = &aw.writer };
 
         try stream.beginObject();
         try stream.objectField("tool_name"); try stream.write(self.tool_name);
@@ -62,10 +63,10 @@ pub const Manifest = struct {
         try stream.objectField("max_stdout_bytes"); try stream.write(self.max_stdout_bytes);
         try stream.objectField("max_stderr_bytes"); try stream.write(self.max_stderr_bytes);
         try stream.objectField("args");
-        try self.args.writeJson(stream);
+        try self.args.writeJson(&stream);
         try stream.endObject();
 
-        return try stream.toOwnedSlice();
+        return try aw.toOwnedSlice();
     }
 };
 
@@ -123,11 +124,8 @@ pub const ArgSchema = struct {
     }
 };
 
-pub fn loadManifest(a: std.mem.Allocator, path: []const u8) !ManifestOwned {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-
-    const bytes = try file.readToEndAlloc(a, 256 * 1024);
+pub fn loadManifest(a: std.mem.Allocator, io: std.Io, path: []const u8) !ManifestOwned {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, std.Io.Limit.limited(256 * 1024));
     defer a.free(bytes);
 
     var km = try parseTomlKeyMap(a, bytes);
@@ -143,8 +141,12 @@ pub const ManifestOwned = struct {
     manifest: Manifest,
 
     pub fn deinit(self: *ManifestOwned, a: std.mem.Allocator) void {
-        // manifest fields point into km-owned allocations, so just free km + derived slices we allocated
-        // free required + properties arrays + nested enum arrays
+        // Free heap-duped string fields
+        a.free(self.manifest.tool_name);
+        a.free(self.manifest.version);
+        a.free(self.manifest.description);
+
+        // Free required + properties arrays + nested enum arrays
         for (self.manifest.args.required) |s| a.free(s);
         a.free(self.manifest.args.required);
 
@@ -176,7 +178,7 @@ fn buildManifest(a: std.mem.Allocator, km: *const KeyMap) !Manifest {
     const required = try getStringArrayDup(a, km, "args.required");
 
     // properties: find all keys like args.properties.<name>.type
-    var props = std.ArrayList(ArgSchema.Property).init(a);
+    var props = std.array_list.Managed(ArgSchema.Property).init(a);
     errdefer {
         for (props.items) |p| {
             a.free(p.name);
@@ -265,7 +267,7 @@ fn buildManifest(a: std.mem.Allocator, km: *const KeyMap) !Manifest {
 fn parseTomlKeyMap(a: std.mem.Allocator, input: []const u8) !KeyMap {
     var km = KeyMap.init(a);
 
-    var table_prefix = std.ArrayList([]const u8).init(a);
+    var table_prefix = std.array_list.Managed([]const u8).init(a);
     defer table_prefix.deinit();
 
     var lines = std.mem.splitScalar(u8, input, '\n');
@@ -325,7 +327,9 @@ fn joinKeyPath(a: std.mem.Allocator, prefix: []const []const u8, leaf: []const u
     return out;
 }
 
-fn parseValue(a: std.mem.Allocator, raw: []const u8) !Value {
+const ManifestParseError = error{ InvalidTomlValue, InvalidString, InvalidEscape, InvalidArray, InvalidFloat, InvalidInt, OutOfMemory };
+
+fn parseValue(a: std.mem.Allocator, raw: []const u8) ManifestParseError!Value {
     const t = std.mem.trim(u8, raw, " \t\r");
     if (t.len == 0) return error.InvalidTomlValue;
 
@@ -338,16 +342,16 @@ fn parseValue(a: std.mem.Allocator, raw: []const u8) !Value {
         const f = std.fmt.parseFloat(f64, t) catch return error.InvalidFloat;
         return .{ .float = f };
     } else {
-        const i = std.fmt.parseInt(i64, t, 10) catch return error.InvalidInt;
-        return .{ .integer = i };
+        const int = std.fmt.parseInt(i64, t, 10) catch return error.InvalidInt;
+        return .{ .integer = int };
     }
 }
 
-fn parseBasicString(a: std.mem.Allocator, t: []const u8) ![]const u8 {
+fn parseBasicString(a: std.mem.Allocator, t: []const u8) ManifestParseError![]const u8 {
     if (t.len < 2 or t[0] != '"' or t[t.len - 1] != '"') return error.InvalidString;
     const inner = t[1 .. t.len - 1];
 
-    var out = std.ArrayList(u8).init(a);
+    var out = std.array_list.Managed(u8).init(a);
     errdefer out.deinit();
 
     var i: usize = 0;
@@ -373,11 +377,11 @@ fn parseBasicString(a: std.mem.Allocator, t: []const u8) ![]const u8 {
     return try out.toOwnedSlice();
 }
 
-fn parseArray(a: std.mem.Allocator, t: []const u8) ![]Value {
+fn parseArray(a: std.mem.Allocator, t: []const u8) ManifestParseError![]Value {
     if (t.len < 2 or t[0] != '[' or t[t.len - 1] != ']') return error.InvalidArray;
     var inner = std.mem.trim(u8, t[1 .. t.len - 1], " \t\r");
 
-    var items = std.ArrayList(Value).init(a);
+    var items = std.array_list.Managed(Value).init(a);
     errdefer {
         for (items.items) |*v| v.deinit(a);
         items.deinit();
@@ -428,7 +432,7 @@ fn getBool(km: *const KeyMap, key: []const u8) ?bool {
 fn getInt(km: *const KeyMap, key: []const u8) ?i64 {
     const v = km.map.get(key) orelse return null;
     return switch (v) {
-        .integer => |i| i,
+        .integer => |int| int,
         else => null,
     };
 }
@@ -436,7 +440,7 @@ fn getStringArrayDup(a: std.mem.Allocator, km: *const KeyMap, key: []const u8) !
     const v = km.map.get(key) orelse return error.MissingKey;
     return switch (v) {
         .array => |arr| {
-            var out = std.ArrayList([]const u8).init(a);
+            var out = std.array_list.Managed([]const u8).init(a);
             errdefer {
                 for (out.items) |s| a.free(s);
                 out.deinit();

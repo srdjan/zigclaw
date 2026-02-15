@@ -4,6 +4,7 @@ const openai = @import("openai_compat.zig");
 const replay = @import("replay.zig");
 const recording = @import("recording.zig");
 const reliable = @import("reliable.zig");
+const recall = @import("../memory/recall.zig");
 
 pub const Provider = union(enum) {
     stub: StubProvider,
@@ -22,23 +23,18 @@ pub const Provider = union(enum) {
         }
     }
 
-    pub fn chat(self: Provider, a: std.mem.Allocator, req: ChatRequest) !ChatResponse {
+    pub fn chat(self: Provider, a: std.mem.Allocator, io: std.Io, req: ChatRequest) !ChatResponse {
         return switch (self) {
-            .stub => |p| p.chat(a, req),
-            .openai_compat => |p| p.chat(a, req),
-            .replay => |p| p.chat(a, req),
-            .record => |p| p.chat(a, req),
-            .reliable => |p| p.chat(a, req),
+            .stub => |p| p.chat(a, io, req),
+            .openai_compat => |p| p.chat(a, io, req),
+            .replay => |p| p.chat(a, io, req),
+            .record => |p| p.chat(a, io, req),
+            .reliable => |p| p.chat(a, io, req),
         };
     }
 };
 
-pub const MemoryItem = struct {
-    title: []const u8,
-    snippet: []const u8,
-    score: f32,
-};
-
+pub const MemoryItem = recall.MemoryItem;
 
 pub const RequestMeta = struct {
     request_id: ?[]const u8 = null,
@@ -64,7 +60,7 @@ pub const ChatResponseView = struct {
 };
 
 pub const StubProvider = struct {
-    pub fn chat(_: StubProvider, a: std.mem.Allocator, req: ChatRequest) !ChatResponse {
+    pub fn chat(_: StubProvider, a: std.mem.Allocator, _: std.Io, req: ChatRequest) !ChatResponse {
         // Deterministic scaffold response (helps tests)
         const mem_n = req.memory_context.len;
         const sys = req.system orelse "";

@@ -32,15 +32,17 @@ pub const RequestOwned = struct {
     }
 };
 
-pub fn readRequest(a: std.mem.Allocator, stream: anytype, max_bytes: usize) !RequestOwned {
-    var buf = std.ArrayList(u8).init(a);
+pub fn readRequest(a: std.mem.Allocator, io: std.Io, stream: *std.Io.net.Stream, max_bytes: usize) !RequestOwned {
+    var buf = std.array_list.Managed(u8).init(a);
     errdefer buf.deinit();
 
+    var rbuf: [4096]u8 = undefined;
+    var reader = stream.reader(io, &rbuf);
     var tmp: [4096]u8 = undefined;
     var header_end: ?usize = null;
 
     while (header_end == null) {
-        const n = try stream.read(&tmp);
+        const n = try reader.interface.readSliceShort(&tmp);
         if (n == 0) return error.ConnectionClosed;
         if (buf.items.len + n > max_bytes) return error.RequestTooLarge;
         try buf.appendSlice(tmp[0..n]);
@@ -57,7 +59,7 @@ pub fn readRequest(a: std.mem.Allocator, stream: anytype, max_bytes: usize) !Req
     // Scan content-length directly from raw bytes - avoids allocating headers twice
     const cl = scanContentLength(buf.items[0..he]);
     while (buf.items.len < after + cl) {
-        const n = try stream.read(&tmp);
+        const n = try reader.interface.readSliceShort(&tmp);
         if (n == 0) return error.ConnectionClosed;
         if (buf.items.len + n > max_bytes) return error.RequestTooLarge;
         try buf.appendSlice(tmp[0..n]);
@@ -67,7 +69,10 @@ pub fn readRequest(a: std.mem.Allocator, stream: anytype, max_bytes: usize) !Req
     return try parseFromRaw(a, raw);
 }
 
-fn parseFromRaw(a: std.mem.Allocator, raw: []u8) !RequestOwned {
+/// Parse an HTTP request from a raw byte buffer. The raw buffer must contain
+/// headers terminated by "\r\n\r\n". Caller owns `raw` - it will be stored
+/// in the returned RequestOwned and freed on deinit.
+pub fn parseFromRaw(a: std.mem.Allocator, raw: []u8) !RequestOwned {
     const he = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.BadRequest;
     const head = raw[0..he];
     const after = he + 4;
@@ -77,7 +82,7 @@ fn parseFromRaw(a: std.mem.Allocator, raw: []u8) !RequestOwned {
 
     const method, const target = try parseRequestLine(req_line);
 
-    var headers_list = std.ArrayList(Header).init(a);
+    var headers_list = std.array_list.Managed(Header).init(a);
     errdefer headers_list.deinit();
 
     while (lines_it.next()) |ln| {
@@ -133,28 +138,33 @@ fn scanContentLength(head: []const u8) usize {
     return 0;
 }
 
-pub fn writeJson(stream: anytype, status_code: u16, body: []const u8) !void {
-    return writeJsonWithHeaders(stream, status_code, body, &.{});
+pub fn writeJson(io: std.Io, stream: *std.Io.net.Stream, status_code: u16, body: []const u8) !void {
+    return writeJsonWithHeaders(io, stream, status_code, body, &.{});
 }
 
-pub fn writeJsonWithHeaders(stream: anytype, status_code: u16, body: []const u8, extra: []const Header) !void {
-    var w = stream.writer();
-    try w.print(
+pub fn writeJsonWithHeaders(io: std.Io, stream: *std.Io.net.Stream, status_code: u16, body: []const u8, extra: []const Header) !void {
+    var wbuf: [4096]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    try w.interface.print(
         "HTTP/1.1 {d} {s}\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n",
         .{ status_code, reasonPhrase(status_code), body.len },
     );
     for (extra) |h| {
-        try w.print("{s}: {s}\r\n", .{ h.name, h.value });
+        try w.interface.print("{s}: {s}\r\n", .{ h.name, h.value });
     }
-    try w.writeAll("\r\n");
-    try w.writeAll(body);
+    try w.interface.writeAll("\r\n");
+    try w.interface.writeAll(body);
+    try w.interface.flush();
 }
 
-pub fn writeText(stream: anytype, status_code: u16, body: []const u8) !void {
-    try stream.writer().print(
+pub fn writeText(io: std.Io, stream: *std.Io.net.Stream, status_code: u16, body: []const u8) !void {
+    var wbuf: [4096]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    try w.interface.print(
         "HTTP/1.1 {d} {s}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}",
         .{ status_code, reasonPhrase(status_code), body.len, body },
     );
+    try w.interface.flush();
 }
 
 fn reasonPhrase(code: u16) []const u8 {

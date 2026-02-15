@@ -24,8 +24,9 @@ pub const ToolRunResult = struct {
 
     pub fn toJsonAlloc(self: ToolRunResult, a: std.mem.Allocator) ![]u8 {
         // stable JSON wrapper
-        var stream = std.json.StringifyStream.init(a);
-        defer stream.deinit();
+        var aw: std.Io.Writer.Allocating = .init(a);
+        defer aw.deinit();
+        var stream: std.json.Stringify = .{ .writer = &aw.writer };
 
         try stream.beginObject();
         try stream.objectField("request_id"); try stream.write(self.request_id);
@@ -45,18 +46,19 @@ pub const ToolRunResult = struct {
         try stream.objectField("stderr"); try stream.write(self.stderr);
         try stream.endObject();
 
-        return try stream.toOwnedSlice();
+        return try aw.toOwnedSlice();
     }
 };
 
 pub fn run(
     a: std.mem.Allocator,
+    io: std.Io,
     cfg: config.ValidatedConfig,
     request_id: []const u8,
     tool: []const u8,
     args_json: []const u8,
 ) !ToolRunResult {
-    var logger = obs.Logger.fromConfig(cfg);
+    var logger = obs.Logger.fromConfig(cfg, io);
 
     const args_sha = hash.sha256HexAlloc(a, args_json) catch "";
     defer if (args_sha.len > 0) a.free(args_sha);
@@ -75,7 +77,7 @@ pub fn run(
     // Locate manifest and load it
     const manifest_path = try std.fmt.allocPrint(a, "{s}/{s}.toml", .{ cfg.raw.tools.plugin_dir, tool });
     defer a.free(manifest_path);
-    var owned = try manifest_mod.loadManifest(a, manifest_path);
+    var owned = try manifest_mod.loadManifest(a, io, manifest_path);
     defer owned.deinit(a);
     const m = owned.manifest;
 
@@ -104,11 +106,11 @@ pub fn run(
     defer a.free(plugin_path);
 
     // Build argv: wasmtime --mapdir HOST::GUEST ... <plugin.wasm>
-    var argv = std.ArrayList([]const u8).init(a);
+    var argv = std.array_list.Managed([]const u8).init(a);
     defer argv.deinit();
 
     // Track heap-allocated map strings separately for correct cleanup
-    var map_strings = std.ArrayList([]u8).init(a);
+    var map_strings = std.array_list.Managed([]u8).init(a);
     defer {
         for (map_strings.items) |s| a.free(s);
         map_strings.deinit();
@@ -125,34 +127,38 @@ pub fn run(
     }
     try argv.append(plugin_path);
 
-    var child = std.ChildProcess.init(argv.items, a);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    var child = try std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
 
-    try child.spawn();
-
-    if (child.stdin) |stdin| {
-        try stdin.writer().writeAll(payload);
-        stdin.close();
+    if (child.stdin) |*stdin| {
+        var sbuf: [4096]u8 = undefined;
+        var sw = stdin.writer(io, &sbuf);
+        try sw.interface.writeAll(payload);
+        try sw.flush();
+        stdin.close(io);
+        child.stdin = null;
     }
 
     // Watchdog for runtime limit (best-effort)
     const deadline_ms = @as(i64, @intCast(m.max_runtime_ms));
-    const wait_res = try waitWithTimeout(&child, deadline_ms);
+    const wait_res = try waitWithTimeout(&child, io, deadline_ms);
 
     if (wait_res.timed_out) return error.ToolTimeout;
 
     // Read bounded outputs
-    const stdout_bytes = try readCapped(a, child.stdout.?, m.max_stdout_bytes);
+    const stdout_bytes = try readCapped(a, io, child.stdout.?, m.max_stdout_bytes);
     defer a.free(stdout_bytes);
 
-    const stderr_bytes = try readCapped(a, child.stderr.?, m.max_stderr_bytes);
+    const stderr_bytes = try readCapped(a, io, child.stderr.?, m.max_stderr_bytes);
     defer a.free(stderr_bytes);
 
-    _ = try child.wait();
+    _ = try child.wait(io);
 
-    const decoded = try protocol.decodeResponse(a, stdout_bytes);
+    var decoded = try protocol.decodeResponse(a, stdout_bytes);
     defer decoded.deinit(a);
 
     return .{
@@ -171,41 +177,33 @@ fn freeMounts(a: std.mem.Allocator, mounts: []const @import("../policy.zig").Mou
     a.free(mounts);
 }
 
-fn readCapped(a: std.mem.Allocator, file: std.fs.File, cap: usize) ![]u8 {
-    var buf = std.ArrayList(u8).init(a);
-    errdefer buf.deinit();
-
-    var tmp: [4096]u8 = undefined;
-    while (true) {
-        const n = try file.reader().read(&tmp);
-        if (n == 0) break;
-        if (buf.items.len + n > cap) return error.OutputTooLarge;
-        try buf.appendSlice(tmp[0..n]);
-    }
-    return try buf.toOwnedSlice();
+fn readCapped(a: std.mem.Allocator, io: std.Io, file: std.Io.File, cap: usize) ![]u8 {
+    var rbuf: [4096]u8 = undefined;
+    var reader = file.reader(io, &rbuf);
+    return try reader.interface.allocRemaining(a, std.Io.Limit.limited(cap));
 }
 
 const WaitResult = struct { timed_out: bool };
 
-fn waitWithTimeout(child: *std.ChildProcess, max_ms: i64) !WaitResult {
+fn waitWithTimeout(child: *std.process.Child, io: std.Io, max_ms: i64) !WaitResult {
     var done = std.atomic.Value(bool).init(false);
 
     const waiter = try std.Thread.spawn(.{}, struct {
-        fn run(ctx: struct { child: *std.ChildProcess, done: *std.atomic.Value(bool) }) void {
-            _ = ctx.child.wait() catch {};
-            ctx.done.store(true, .seq_cst);
+        fn run(c: *std.process.Child, i: std.Io, d: *std.atomic.Value(bool)) void {
+            _ = c.wait(i) catch {};
+            d.store(true, .seq_cst);
         }
-    }.run, .{ .child = child, .done = &done });
+    }.run, .{ child, io, &done });
 
     var waited: i64 = 0;
     const step: i64 = 10;
     while (!done.load(.seq_cst)) {
         if (waited >= max_ms) {
-            _ = child.kill() catch {};
+            child.kill(io);
             waiter.join();
             return .{ .timed_out = true };
         }
-        std.time.sleep(@as(u64, @intCast(step)) * std.time.ns_per_ms);
+        io.sleep(std.Io.Duration.fromMilliseconds(step), .awake) catch {};
         waited += step;
     }
     waiter.join();

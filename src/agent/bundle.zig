@@ -17,13 +17,13 @@ pub const Bundle = struct {
     }
 };
 
-pub fn build(a: std.mem.Allocator, cfg: config.ValidatedConfig, message: []const u8) !Bundle {
-    const sys = try prompt.buildSystemPrompt(a, cfg);
+pub fn build(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, message: []const u8) !Bundle {
+    const sys = try prompt.buildSystemPrompt(a, io, cfg);
 
-    var mem = try memory_mod.MemoryBackend.fromConfig(a, cfg.raw.memory);
+    var mem = try memory_mod.MemoryBackend.fromConfig(a, io, cfg.raw.memory);
     defer mem.deinit(a);
 
-    const recalled = try mem.recall(a, message, 5);
+    const recalled = try mem.recall(a, io, message, 5);
 
     const hash_hex = try computePromptHashHex(a, sys, message, recalled);
 
@@ -56,42 +56,49 @@ fn computePromptHashHex(a: std.mem.Allocator, system: []const u8, user: []const 
 }
 
 pub fn dumpJsonAlloc(a: std.mem.Allocator, b: Bundle) ![]u8 {
-    var stream = std.json.StringifyStream.init(a);
-    defer stream.deinit();
+    var out = std.Io.Writer.Allocating.init(a);
+
+    var stream = std.json.Stringify{ .writer = &out.writer, .options = .{ .whitespace = .minified } };
 
     try stream.beginObject();
-    try stream.objectField("prompt_hash"); try stream.write(b.prompt_hash_hex);
-    try stream.objectField("policy_hash"); try stream.write(b.policy_hash_hex);
-    try stream.objectField("system"); try stream.write(b.system);
-    try stream.objectField("user"); try stream.write(b.user);
+    try stream.objectField("prompt_hash");
+    try stream.write(b.prompt_hash_hex);
+    try stream.objectField("policy_hash");
+    try stream.write(b.policy_hash_hex);
+    try stream.objectField("system");
+    try stream.write(b.system);
+    try stream.objectField("user");
+    try stream.write(b.user);
 
     try stream.objectField("memory");
     try stream.beginArray();
     for (b.memory) |m| {
         try stream.beginObject();
-        try stream.objectField("title"); try stream.write(m.title);
-        try stream.objectField("snippet"); try stream.write(m.snippet);
+        try stream.objectField("title");
+        try stream.write(m.title);
+        try stream.objectField("snippet");
+        try stream.write(m.snippet);
         try stream.endObject();
     }
     try stream.endArray();
 
     try stream.endObject();
-    return try stream.toOwnedSlice();
+    return try out.toOwnedSlice();
 }
 
 pub fn dumpTextAlloc(a: std.mem.Allocator, b: Bundle) ![]u8 {
-    var out = std.ArrayList(u8).init(a);
-    errdefer out.deinit();
+    var aw: std.Io.Writer.Allocating = .init(a);
+    errdefer aw.deinit();
 
-    try out.writer().print("prompt_hash: {s}\n", .{b.prompt_hash_hex});
-    try out.writer().print("policy_hash: {s}\n", .{b.policy_hash_hex});
-    try out.writer().writeAll("\n=== system ===\n");
-    try out.writer().writeAll(b.system);
-    try out.writer().writeAll("\n=== user ===\n");
-    try out.writer().writeAll(b.user);
-    try out.writer().writeAll("\n\n=== memory ===\n");
+    try aw.writer.print("prompt_hash: {s}\n", .{b.prompt_hash_hex});
+    try aw.writer.print("policy_hash: {s}\n", .{b.policy_hash_hex});
+    try aw.writer.writeAll("\n=== system ===\n");
+    try aw.writer.writeAll(b.system);
+    try aw.writer.writeAll("\n=== user ===\n");
+    try aw.writer.writeAll(b.user);
+    try aw.writer.writeAll("\n\n=== memory ===\n");
     for (b.memory) |m| {
-        try out.writer().print("- {s}: {s}\n", .{m.title, m.snippet});
+        try aw.writer.print("- {s}: {s}\n", .{ m.title, m.snippet });
     }
-    return try out.toOwnedSlice();
+    return try aw.toOwnedSlice();
 }

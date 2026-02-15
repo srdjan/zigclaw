@@ -3,6 +3,18 @@ const commands = @import("security/commands.zig");
 const pairing = @import("security/pairing.zig");
 const config = @import("config.zig");
 
+// Helper: create a threaded Io suitable for tests that need file/network access.
+fn makeTestIo(a: std.mem.Allocator) !struct { threaded: *std.Io.Threaded, io: std.Io } {
+    const threaded = try a.create(std.Io.Threaded);
+    threaded.* = std.Io.Threaded.init(a, .{ .environ = .empty });
+    return .{ .threaded = threaded, .io = threaded.io() };
+}
+
+fn destroyTestIo(a: std.mem.Allocator, t: *std.Io.Threaded) void {
+    t.deinit();
+    a.destroy(t);
+}
+
 test "commands.isCommandSafe denies separators" {
     try std.testing.expect(commands.isCommandSafe("ls -la"));
     try std.testing.expect(!commands.isCommandSafe("ls; rm -rf /"));
@@ -20,18 +32,25 @@ test "config validate emits stable normalized TOML" {
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    const vc = try config.loadAndValidate(a, "zigclaw.toml");
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
     defer vc.deinit(a);
 
-    var out = std.ArrayList(u8).init(a);
-    defer out.deinit();
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
 
-    try vc.printNormalizedToml(a, out.writer());
+    try vc.printNormalizedToml(a, &aw.writer);
 
-    const expected = try std.fs.cwd().readFileAlloc(a, "tests/golden/config_normalized.toml", 1024 * 1024);
+    const out = try aw.toOwnedSlice();
+    defer a.free(out);
+
+    const expected = try std.Io.Dir.cwd().readFileAlloc(io, "tests/golden/config_normalized.toml", a, std.Io.Limit.limited(1024 * 1024));
     defer a.free(expected);
 
-    try std.testing.expectEqualStrings(expected, out.items);
+    try std.testing.expectEqualStrings(expected, out);
 }
 
 test "policy explain outputs stable JSON (except hash)" {
@@ -39,13 +58,17 @@ test "policy explain outputs stable JSON (except hash)" {
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    const vc = try config.loadAndValidate(a, "zigclaw.toml");
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
     defer vc.deinit(a);
 
     const out = try vc.policy.explainToolJsonAlloc(a, "fs_read");
     defer a.free(out);
 
-    const expected0 = try std.fs.cwd().readFileAlloc(a, "tests/golden/policy_explain_fs_read.json", 1024 * 1024);
+    const expected0 = try std.Io.Dir.cwd().readFileAlloc(io, "tests/golden/policy_explain_fs_read.json", a, std.Io.Limit.limited(1024 * 1024));
     defer a.free(expected0);
 
     // Replace placeholder with actual hash
@@ -71,7 +94,11 @@ test "manifest load + args schema validation (echo)" {
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    var owned = try tool_manifest.loadManifest(a, "tests/fixtures/echo.toml");
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var owned = try tool_manifest.loadManifest(a, io, "tests/fixtures/echo.toml");
     defer owned.deinit(a);
 
     // valid
@@ -81,7 +108,7 @@ test "manifest load + args schema validation (echo)" {
     try std.testing.expectError(tool_schema.ValidationError.MissingRequired, tool_schema.validateArgs(owned.manifest.args, "{}"));
 
     // too long
-    var big = try a.alloc(u8, 1100);
+    const big = try a.alloc(u8, 1100);
     defer a.free(big);
     @memset(big, 'a');
     const args = try std.fmt.allocPrint(a, "{{\"text\":\"{s}\"}}", .{big});
@@ -94,7 +121,11 @@ test "manifest load + args schema validation (fs_read)" {
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    var owned = try tool_manifest.loadManifest(a, "tests/fixtures/fs_read.toml");
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var owned = try tool_manifest.loadManifest(a, io, "tests/fixtures/fs_read.toml");
     defer owned.deinit(a);
 
     try tool_schema.validateArgs(owned.manifest.args, "{\"path\":\"/workspace/README.md\",\"max_bytes\":65536}");
@@ -110,13 +141,17 @@ test "system prompt uses stable workspace snapshot (fixture)" {
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    const vc = try config.loadAndValidate(a, "tests/fixture_prompt.toml");
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "tests/fixture_prompt.toml");
     defer vc.deinit(a);
 
-    const sys = try agent_prompt.buildSystemPrompt(a, vc);
+    const sys = try agent_prompt.buildSystemPrompt(a, io, vc);
     defer a.free(sys);
 
-    const expected0 = try std.fs.cwd().readFileAlloc(a, "tests/golden/system_prompt_fixture.txt", 1024 * 1024);
+    const expected0 = try std.Io.Dir.cwd().readFileAlloc(io, "tests/golden/system_prompt_fixture.txt", a, std.Io.Limit.limited(1024 * 1024));
     defer a.free(expected0);
 
     // substitute policy hash placeholder
@@ -139,10 +174,14 @@ test "prompt bundle includes prompt_hash (fixture)" {
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    const vc = try config.loadAndValidate(a, "tests/fixture_prompt.toml");
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "tests/fixture_prompt.toml");
     defer vc.deinit(a);
 
-    var b = try agent_bundle.build(a, vc, "hello");
+    var b = try agent_bundle.build(a, io, vc, "hello");
     defer b.deinit(a);
 
     try std.testing.expect(b.prompt_hash_hex.len == 64);
@@ -157,6 +196,10 @@ test "provider fixtures record/replay (stub)" {
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
     // Build a minimal config in-memory (avoid parsing); use stub provider
     var cfg = config.Config{};
     cfg.provider_primary.kind = .stub;
@@ -169,7 +212,7 @@ test "provider fixtures record/replay (stub)" {
     cfg.provider_reliable.retries = 0;
 
     // Validate to get policy (workspace root doesn't matter for this test)
-    const vc = try @import("config.zig").loadAndValidate(a, "zigclaw.toml");
+    var vc = try @import("config.zig").loadAndValidate(a, io, "zigclaw.toml");
     defer vc.deinit(a);
 
     // Overwrite provider configs in validated copy (policy stays same)
@@ -189,7 +232,7 @@ test "provider fixtures record/replay (stub)" {
         .memory_context = &.{},
     };
 
-    const resp = try p.chat(a, req);
+    const resp = try p.chat(a, io, req);
     defer a.free(resp.content);
 
     // fixture should exist
@@ -199,7 +242,12 @@ test "provider fixtures record/replay (stub)" {
     const path = try provider_fixtures.fixturePathAlloc(a, cfg.provider_fixtures.dir, hash);
     defer a.free(path);
 
-    try std.testing.expect(std.fs.cwd().access(path, .{}) == null);
+    // Check file exists via statFile (access is not available in 0.16 Io.Dir API)
+    const stat_ok = blk: {
+        _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch break :blk false;
+        break :blk true;
+    };
+    try std.testing.expect(stat_ok);
 
     // replay mode
     var cfg_r = cfg;
@@ -214,13 +262,14 @@ test "provider fixtures record/replay (stub)" {
     var pr = try provider_factory.build(a, vc3);
     defer pr.deinit(a);
 
-    const resp2 = try pr.chat(a, req);
+    const resp2 = try pr.chat(a, io, req);
     defer a.free(resp2.content);
 
     try std.testing.expectEqualStrings(resp.content, resp2.content);
 
     // cleanup dir best-effort
-    std.fs.cwd().deleteTree(cfg.provider_fixtures.dir) catch {};
+    // TODO: verify 0.16 API - deleteTree may not exist on Io.Dir; may need alternative cleanup
+    std.Io.Dir.cwd().deleteTree(io, cfg.provider_fixtures.dir) catch {};
 }
 
 const recall = @import("memory/recall.zig");
@@ -236,15 +285,18 @@ test "gateway http parses request line + headers" {
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    const raw =
+    const raw_const =
         "GET /health HTTP/1.1\r\n" ++
         "Host: localhost\r\n" ++
         "Content-Length: 0\r\n" ++
         "\r\n";
 
-    // parseFromRaw is internal, so we call the public parse via readRequest by using a fixedBufferStream
-    var fbs = std.io.fixedBufferStream(raw);
-    var req = try gw_http.readRequest(a, fbs.reader(), 64 * 1024);
+    // Dupe into mutable buffer since parseFromRaw takes []u8
+    const raw = try a.dupe(u8, raw_const);
+    // raw ownership transfers to req on success; on error we must free it
+    errdefer a.free(raw);
+
+    var req = try gw_http.parseFromRaw(a, raw);
     defer req.deinit(a);
 
     try std.testing.expectEqualStrings("GET", req.method);
@@ -355,7 +407,15 @@ test "hexAlloc encodes bytes correctly" {
 // ---- obs/trace.zig tests ----
 
 test "newRequestId returns 32 hex chars" {
-    const rid = obs_trace.newRequestId();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const rid = obs_trace.newRequestId(io);
     const s = rid.slice();
     try std.testing.expectEqual(@as(usize, 32), s.len);
     for (s) |c| {
@@ -364,8 +424,16 @@ test "newRequestId returns 32 hex chars" {
 }
 
 test "newRequestId returns distinct values" {
-    const r1 = obs_trace.newRequestId();
-    const r2 = obs_trace.newRequestId();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const r1 = obs_trace.newRequestId(io);
+    const r2 = obs_trace.newRequestId(io);
     try std.testing.expect(!std.mem.eql(u8, r1.slice(), r2.slice()));
 }
 

@@ -1,55 +1,55 @@
 const std = @import("std");
 const App = @import("app.zig").App;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer {
-        const check = gpa.deinit();
-        if (check == .leak) std.log.err("memory leak detected", .{});
-    }
-    const a = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const a = init.gpa;
+    const io = init.io;
 
-    const argv = try std.process.argsAlloc(a);
-    defer std.process.argsFree(a, argv);
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (argv.len < 2) {
-        try usage(std.io.getStdOut().writer());
+        try usage(io);
         return;
     }
 
-    const cmd = argv[1];
+    const cmd: []const u8 = argv[1];
     if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
-        try usage(std.io.getStdOut().writer());
+        try usage(io);
         return;
     }
 
-    var app = try App.init(a);
+    var app = try App.init(a, io);
     defer app.deinit();
 
     if (std.mem.eql(u8, cmd, "config")) {
-        const sub = if (argv.len >= 3) argv[2] else "help";
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
         if (std.mem.eql(u8, sub, "validate")) {
             const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
             const format = flagValue(argv, "--format") orelse "toml";
 
-            const validated = try app.loadConfig(cfg_path);
+            var validated = try app.loadConfig(cfg_path);
             defer validated.deinit(a);
 
             if (validated.warnings.len > 0) {
-                const ew = std.io.getStdErr().writer();
+                var buf: [4096]u8 = undefined;
+                var fw = std.Io.File.stderr().writer(io, &buf);
                 for (validated.warnings) |wrn| {
-                    try ew.print("warning: {s}: {s}\n", .{ wrn.key_path, wrn.message });
+                    try fw.interface.print("warning: {s}: {s}\n", .{ wrn.key_path, wrn.message });
                 }
+                try fw.flush();
             }
 
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
             if (std.mem.eql(u8, format, "toml")) {
-                try validated.printNormalizedToml(a, std.io.getStdOut().writer());
+                try validated.printNormalizedToml(a, &ow.interface);
             } else {
-                try validated.print(std.io.getStdOut().writer());
+                try validated.print(&ow.interface);
             }
+            try ow.flush();
             return;
         }
-        try usage(std.io.getStdOut().writer());
+        try usage(io);
         return;
     }
 
@@ -57,7 +57,7 @@ pub fn main() !void {
         const msg = flagValue(argv, "--message") orelse "hello";
         const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
 
-        const validated = try app.loadConfig(cfg_path);
+        var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
 
         try app.runAgent(validated, msg);
@@ -65,10 +65,10 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, cmd, "prompt")) {
-        const sub = if (argv.len >= 3) argv[2] else "help";
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
         const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
 
-        const validated = try app.loadConfig(cfg_path);
+        var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
 
         if (std.mem.eql(u8, sub, "dump")) {
@@ -76,7 +76,7 @@ pub fn main() !void {
             const format = flagValue(argv, "--format") orelse "json";
             const out_path = flagValue(argv, "--out");
 
-            var b = try @import("agent/bundle.zig").build(a, validated, msg);
+            var b = try @import("agent/bundle.zig").build(a, io, validated, msg);
             defer b.deinit(a);
 
             const payload = if (std.mem.eql(u8, format, "text"))
@@ -86,12 +86,18 @@ pub fn main() !void {
             defer a.free(payload);
 
             if (out_path) |p| {
-                var f = try std.fs.cwd().createFile(p, .{ .truncate = true });
-                defer f.close();
-                try f.writer().writeAll(payload);
-                try f.writer().writeAll("\n");
+                var f = try std.Io.Dir.cwd().createFile(io, p, .{ .truncate = true });
+                defer f.close(io);
+                var fbuf: [4096]u8 = undefined;
+                var fw = f.writer(io, &fbuf);
+                try fw.interface.writeAll(payload);
+                try fw.interface.writeAll("\n");
+                try fw.flush();
             } else {
-                try std.io.getStdOut().writer().print("{s}\n", .{payload});
+                var obuf: [4096]u8 = undefined;
+                var ow = std.Io.File.stdout().writer(io, &obuf);
+                try ow.interface.print("{s}\n", .{payload});
+                try ow.flush();
             }
             return;
         }
@@ -100,69 +106,84 @@ pub fn main() !void {
             const a_path = flagValue(argv, "--a") orelse return error.InvalidArgs;
             const b_path = flagValue(argv, "--b") orelse return error.InvalidArgs;
 
-            const left = try std.fs.cwd().readFileAlloc(a, a_path, 4 * 1024 * 1024);
+            const left = try std.Io.Dir.cwd().readFileAlloc(io, a_path, a, std.Io.Limit.limited(4 * 1024 * 1024));
             defer a.free(left);
-            const right = try std.fs.cwd().readFileAlloc(a, b_path, 4 * 1024 * 1024);
+            const right = try std.Io.Dir.cwd().readFileAlloc(io, b_path, a, std.Io.Limit.limited(4 * 1024 * 1024));
             defer a.free(right);
 
             const d = try @import("util/diff.zig").diffTextAlloc(a, left, right);
             defer a.free(d);
-            try std.io.getStdOut().writer().print("{s}", .{d});
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}", .{d});
+            try ow.flush();
             return;
         }
 
-        try usage(std.io.getStdOut().writer());
+        try usage(io);
         return;
     }
 
     if (std.mem.eql(u8, cmd, "tools")) {
-        const sub = if (argv.len >= 3) argv[2] else "help";
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
         const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
-        const validated = try app.loadConfig(cfg_path);
+        var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
 
         if (std.mem.eql(u8, sub, "list")) {
-            const json = try @import("tools/manifest_runtime.zig").listToolsJsonAlloc(a, validated.raw.tools.plugin_dir);
+            const json = try @import("tools/manifest_runtime.zig").listToolsJsonAlloc(a, io, validated.raw.tools.plugin_dir);
             defer a.free(json);
-            try std.io.getStdOut().writer().print("{s}\n", .{json});
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{json});
+            try ow.flush();
             return;
         }
 
         if (std.mem.eql(u8, sub, "describe")) {
             if (argv.len < 4) return error.InvalidArgs;
-            const tool = argv[3];
-            const json = try @import("tools/manifest_runtime.zig").describeToolJsonAlloc(a, validated.raw.tools.plugin_dir, tool);
+            const tool: []const u8 = argv[3];
+            const json = try @import("tools/manifest_runtime.zig").describeToolJsonAlloc(a, io, validated.raw.tools.plugin_dir, tool);
             defer a.free(json);
-            try std.io.getStdOut().writer().print("{s}\n", .{json});
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{json});
+            try ow.flush();
             return;
         }
 
         if (std.mem.eql(u8, sub, "run")) {
             if (argv.len < 4) return error.InvalidArgs;
-            const tool = argv[3];
+            const tool: []const u8 = argv[3];
             const args_json = flagValue(argv, "--args") orelse "{}";
 
-            const res = try app.runTool(validated, tool, args_json);
+            var res = try app.runTool(validated, tool, args_json);
             defer res.deinit(a);
 
             const out = try res.toJsonAlloc(a);
             defer a.free(out);
-            try std.io.getStdOut().writer().print("{s}\n", .{out});
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
             return;
         }
 
-        try usage(std.io.getStdOut().writer());
+        try usage(io);
         return;
     }
 
     if (std.mem.eql(u8, cmd, "policy")) {
-        const sub = if (argv.len >= 3) argv[2] else "help";
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
         const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
-        const validated = try app.loadConfig(cfg_path);
+        var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
 
         if (std.mem.eql(u8, sub, "hash")) {
-            try std.io.getStdOut().writer().print("{s}\n", .{validated.policy.policyHash()});
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{validated.policy.policyHash()});
+            try ow.flush();
             return;
         }
 
@@ -170,18 +191,21 @@ pub fn main() !void {
             const tool = flagValue(argv, "--tool") orelse return error.InvalidArgs;
             const json = try validated.policy.explainToolJsonAlloc(a, tool);
             defer a.free(json);
-            try std.io.getStdOut().writer().print("{s}\n", .{json});
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{json});
+            try ow.flush();
             return;
         }
 
-        try usage(std.io.getStdOut().writer());
+        try usage(io);
         return;
     }
 
     if (std.mem.eql(u8, cmd, "gateway")) {
-        const sub = if (argv.len >= 3) argv[2] else "start";
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "start";
         if (!std.mem.eql(u8, sub, "start")) {
-            try usage(std.io.getStdOut().writer());
+            try usage(io);
             return;
         }
 
@@ -190,17 +214,17 @@ pub fn main() !void {
         const port = try std.fmt.parseInt(u16, port_s, 10);
 
         const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
-        const validated = try app.loadConfig(cfg_path);
+        var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
 
-        try @import("gateway/server.zig").start(a, &app, validated, bind, port);
+        try @import("gateway/server.zig").start(a, io, &app, validated, bind, port);
         return;
     }
 
-    try usage(std.io.getStdOut().writer());
+    try usage(io);
 }
 
-fn flagValue(argv: []const []const u8, name: []const u8) ?[]const u8 {
+fn flagValue(argv: []const [:0]const u8, name: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i + 1 < argv.len) : (i += 1) {
         if (std.mem.eql(u8, argv[i], name)) return argv[i + 1];
@@ -208,8 +232,10 @@ fn flagValue(argv: []const []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn usage(w: anytype) !void {
-    try w.writeAll(
+fn usage(io: std.Io) !void {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+    try w.interface.writeAll(
         \\zigclaw
         \\
         \\Usage:
@@ -225,4 +251,5 @@ fn usage(w: anytype) !void {
         \\  zigclaw gateway start [--bind 127.0.0.1] [--port 8787] [--config zigclaw.toml]
         \\
     );
+    try w.flush();
 }

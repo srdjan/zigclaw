@@ -22,8 +22,9 @@ pub const ToolResponse = struct {
 };
 
 pub fn encodeRequest(a: std.mem.Allocator, req: ToolRequest) ![]u8 {
-    var stream = std.json.StringifyStream.init(a);
-    defer stream.deinit();
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
 
     try stream.beginObject();
     try stream.objectField("protocol_version"); try stream.write(req.protocol_version);
@@ -44,7 +45,7 @@ pub fn encodeRequest(a: std.mem.Allocator, req: ToolRequest) ![]u8 {
     try stream.endArray();
 
     try stream.endObject();
-    return try stream.toOwnedSlice();
+    return try aw.toOwnedSlice();
 }
 
 pub fn decodeResponse(a: std.mem.Allocator, bytes: []const u8) !ToolResponseOwned {

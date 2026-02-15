@@ -15,21 +15,23 @@ pub const Logger = struct {
     max_file_bytes: u64,
     max_files: u32,
     workspace_root: []const u8,
+    io: std.Io,
 
-    pub fn fromConfig(cfg: config.ValidatedConfig) Logger {
+    pub fn fromConfig(cfg: config.ValidatedConfig, io: std.Io) Logger {
         return .{
             .enabled = cfg.raw.observability.enabled,
             .dir = cfg.raw.observability.dir,
             .max_file_bytes = cfg.raw.observability.max_file_bytes,
             .max_files = cfg.raw.observability.max_files,
             .workspace_root = cfg.raw.security.workspace_root,
+            .io = io,
         };
     }
 
     pub fn logJson(self: Logger, a: std.mem.Allocator, kind: EventKind, request_id: []const u8, payload_obj: anytype) void {
         if (!self.enabled) return;
 
-        const line = buildEventLine(a, kind, request_id, payload_obj) catch |e| {
+        const line = buildEventLine(self.io, a, kind, request_id, payload_obj) catch |e| {
             std.log.err("obs: failed to build log line: {s}", .{@errorName(e)});
             return;
         };
@@ -39,35 +41,44 @@ pub const Logger = struct {
     }
 };
 
-fn buildEventLine(a: std.mem.Allocator, kind: EventKind, request_id: []const u8, payload_obj: anytype) ![]u8 {
-    var stream = std.json.StringifyStream.init(a);
-    defer stream.deinit();
+fn buildEventLine(io: std.Io, a: std.mem.Allocator, kind: EventKind, request_id: []const u8, payload_obj: anytype) ![]u8 {
+    var out = std.Io.Writer.Allocating.init(a);
+    var stream: std.json.Stringify = .{
+        .writer = &out.writer,
+        .options = .{ .whitespace = .minified },
+    };
 
-    const now_ms = std.time.milliTimestamp();
+    const ts = std.Io.Clock.now(.real, io);
+    const now_ms: i64 = @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_ms));
 
     try stream.beginObject();
-    try stream.objectField("ts_ms"); try stream.write(now_ms);
-    try stream.objectField("kind"); try stream.write(@tagName(kind));
-    try stream.objectField("request_id"); try stream.write(request_id);
-    try stream.objectField("payload"); try stream.write(payload_obj);
+    try stream.objectField("ts_ms");
+    try stream.write(now_ms);
+    try stream.objectField("kind");
+    try stream.write(@tagName(kind));
+    try stream.objectField("request_id");
+    try stream.write(request_id);
+    try stream.objectField("payload");
+    try stream.write(payload_obj);
     try stream.endObject();
 
-    // JSONL newline added by writer
-    const json = try stream.toOwnedSlice();
-    var out = try a.alloc(u8, json.len + 1);
-    std.mem.copyForwards(u8, out[0..json.len], json);
-    out[json.len] = '\n';
+    const json = try out.toOwnedSlice();
+    var result = try a.alloc(u8, json.len + 1);
+    @memcpy(result[0..json.len], json);
+    result[json.len] = '\n';
     a.free(json);
-    return out;
+    return result;
 }
 
 fn appendLineBestEffort(self: Logger, a: std.mem.Allocator, line: []const u8) void {
+    const io = self.io;
+
     // Resolve log dir relative to workspace root for predictable behavior.
     const dir = std.fs.path.join(a, &.{ self.workspace_root, self.dir }) catch return;
     defer a.free(dir);
 
-    std.fs.cwd().makePath(dir) catch |e| {
-        std.log.err("obs: makePath failed: {s}", .{@errorName(e)});
+    std.Io.Dir.cwd().createDirPath(io, dir) catch |e| {
+        std.log.err("obs: createDirPath failed: {s}", .{@errorName(e)});
         return;
     };
 
@@ -79,39 +90,48 @@ fn appendLineBestEffort(self: Logger, a: std.mem.Allocator, line: []const u8) vo
     const path = std.fs.path.join(a, &.{ dir, "zigclaw.jsonl" }) catch return;
     defer a.free(path);
 
-    var file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch |e| {
-        if (e == error.FileNotFound) {
-            var f = std.fs.cwd().createFile(path, .{ .truncate = false }) catch |e2| {
-                std.log.err("obs: create log file failed: {s}", .{@errorName(e2)});
-                return;
-            };
-            defer f.close();
-            f.seekFromEnd(0) catch {};
-            f.writer().writeAll(line) catch {};
-            return;
-        }
-        std.log.err("obs: open log file failed: {s}", .{@errorName(e)});
+    // Read existing content, append new line, write back.
+    // This is correct for a best-effort logger with rotation; the file
+    // stays small because rotateIfNeeded caps its size.
+    const existing = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        a,
+        std.Io.Limit.limited(self.max_file_bytes),
+    ) catch "";
+    defer if (existing.len > 0) a.free(existing);
+
+    var combined = a.alloc(u8, existing.len + line.len) catch return;
+    defer a.free(combined);
+    @memcpy(combined[0..existing.len], existing);
+    @memcpy(combined[existing.len..], line);
+
+    var f = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch |e2| {
+        std.log.err("obs: create log file failed: {s}", .{@errorName(e2)});
         return;
     };
-    defer file.close();
+    defer f.close(io);
 
-    file.seekFromEnd(0) catch {};
-    file.writer().writeAll(line) catch {};
+    var fbuf: [4096]u8 = undefined;
+    var fw = f.writer(io, &fbuf);
+    fw.interface.writeAll(combined) catch {};
+    fw.flush() catch {};
 }
 
 fn rotateIfNeeded(self: Logger, a: std.mem.Allocator, dir: []const u8) !void {
     if (self.max_files == 0) return;
+    const io = self.io;
 
     const base = try std.fs.path.join(a, &.{ dir, "zigclaw.jsonl" });
     defer a.free(base);
 
-    const st = std.fs.cwd().statFile(base) catch return;
+    const st = std.Io.Dir.cwd().statFile(io, base, .{}) catch return;
     if (st.size < self.max_file_bytes) return;
 
     // delete oldest: zigclaw.jsonl.<max_files>
     const oldest = try std.fmt.allocPrint(a, "{s}.{d}", .{ base, self.max_files });
     defer a.free(oldest);
-    _ = std.fs.cwd().deleteFile(oldest) catch {};
+    _ = std.Io.Dir.cwd().deleteFile(io, oldest) catch {};
 
     // shift: N-1 -> N
     var i: u32 = self.max_files;
@@ -120,11 +140,11 @@ fn rotateIfNeeded(self: Logger, a: std.mem.Allocator, dir: []const u8) !void {
         defer a.free(from);
         const to = try std.fmt.allocPrint(a, "{s}.{d}", .{ base, i });
         defer a.free(to);
-        std.fs.cwd().rename(from, to) catch {};
+        std.Io.Dir.rename(std.Io.Dir.cwd(), from, std.Io.Dir.cwd(), to, io) catch {};
     }
 
     // base -> .1
-    const to1 = try std.fmt.allocPrint(a, "{s}.1", .{ base });
+    const to1 = try std.fmt.allocPrint(a, "{s}.1", .{base});
     defer a.free(to1);
-    std.fs.cwd().rename(base, to1) catch {};
+    std.Io.Dir.rename(std.Io.Dir.cwd(), base, std.Io.Dir.cwd(), to1, io) catch {};
 }

@@ -13,14 +13,14 @@ pub const ReplayProvider = struct {
         a.free(self.dir);
     }
 
-    pub fn chat(self: ReplayProvider, a: std.mem.Allocator, req: provider.ChatRequest) !provider.ChatResponse {
+    pub fn chat(self: ReplayProvider, a: std.mem.Allocator, io: std.Io, req: provider.ChatRequest) !provider.ChatResponse {
         const hash = try fixtures.requestHashHexAlloc(a, req);
         defer a.free(hash);
 
         const path = try fixtures.fixturePathAlloc(a, self.dir, hash);
         defer a.free(path);
 
-        const bytes = std.fs.cwd().readFileAlloc(a, path, 4 * 1024 * 1024) catch return error.FixtureNotFound;
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, std.Io.Limit.limited(4 * 1024 * 1024)) catch return error.FixtureNotFound;
         defer a.free(bytes);
 
         var arena = std.heap.ArenaAllocator.init(a);

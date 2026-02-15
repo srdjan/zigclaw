@@ -15,14 +15,14 @@ pub const ReliableProvider = struct {
         a.destroy(self.inner);
     }
 
-    pub fn chat(self: ReliableProvider, a: std.mem.Allocator, req: provider.ChatRequest) !provider.ChatResponse {
+    pub fn chat(self: ReliableProvider, a: std.mem.Allocator, io: std.Io, req: provider.ChatRequest) !provider.ChatResponse {
         var attempt: u32 = 0;
         while (true) : (attempt += 1) {
-            const res = self.inner.chat(a, req);
+            const res = self.inner.chat(a, io, req);
             if (res) |ok| return ok else |err| {
                 if (attempt >= self.retries) return err;
                 // deterministic backoff
-                std.time.sleep(@as(u64, self.backoff_ms) * std.time.ns_per_ms);
+                io.sleep(std.Io.Duration.fromMilliseconds(@intCast(self.backoff_ms)), .awake) catch {};
                 continue;
             }
         }

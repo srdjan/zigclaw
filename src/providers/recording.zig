@@ -19,11 +19,11 @@ pub const RecordingProvider = struct {
         a.destroy(self.inner);
     }
 
-    pub fn chat(self: RecordingProvider, a: std.mem.Allocator, req: provider.ChatRequest) !provider.ChatResponse {
-        const resp = try self.inner.chat(a, req);
+    pub fn chat(self: RecordingProvider, a: std.mem.Allocator, io: std.Io, req: provider.ChatRequest) anyerror!provider.ChatResponse {
+        const resp = try self.inner.chat(a, io, req);
 
         // write fixture (best-effort)
-        std.fs.cwd().makePath(self.dir) catch {};
+        std.Io.Dir.cwd().createDirPath(io, self.dir) catch {};
         const hash = fixtures.requestHashHexAlloc(a, req) catch "";
         defer if (hash.len > 0) a.free(hash);
 
@@ -33,15 +33,18 @@ pub const RecordingProvider = struct {
 
             if (path.len > 0) {
                 // if exists, do not overwrite
-                const file_exists = if (std.fs.cwd().access(path, .{})) |_| true else |_| false;
+                const file_exists = if (std.Io.Dir.cwd().access(io, path, .{})) |_| true else |_| false;
                 if (!file_exists) {
-                    var file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch null;
+                    var file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch null;
                     if (file) |*f| {
-                        defer f.close();
+                        defer f.close(io);
                         const record = try buildFixtureJsonAlloc(a, req, resp.content, req.meta);
                         defer a.free(record);
-                        f.writer().writeAll(record) catch {};
-                        f.writer().writeAll("\n") catch {};
+                        var fbuf: [4096]u8 = undefined;
+                        var fw = f.writer(io, &fbuf);
+                        fw.interface.writeAll(record) catch {};
+                        fw.interface.writeAll("\n") catch {};
+                        fw.flush() catch {};
                     }
                 }
             }
@@ -52,32 +55,45 @@ pub const RecordingProvider = struct {
 };
 
 fn buildFixtureJsonAlloc(a: std.mem.Allocator, req: provider.ChatRequest, content: []const u8, meta: provider.RequestMeta) ![]u8 {
-    var stream = std.json.StringifyStream.init(a);
-    defer stream.deinit();
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
 
     try stream.beginObject();
 
     if (meta.request_id) |rid| {
-        try stream.objectField("request_id"); try stream.write(rid);
+        try stream.objectField("request_id");
+        try stream.write(rid);
     }
     if (meta.prompt_hash) |ph| {
-        try stream.objectField("prompt_hash"); try stream.write(ph);
+        try stream.objectField("prompt_hash");
+        try stream.write(ph);
     }
 
     try stream.objectField("request");
     try stream.beginObject();
-    if (req.system) |s| { try stream.objectField("system"); try stream.write(s); }
-    try stream.objectField("user"); try stream.write(req.user);
-    try stream.objectField("model"); try stream.write(req.model);
-    try stream.objectField("temperature"); try stream.write(req.temperature);
+    if (req.system) |s| {
+        try stream.objectField("system");
+        try stream.write(s);
+    }
+    try stream.objectField("user");
+    try stream.write(req.user);
+    try stream.objectField("model");
+    try stream.write(req.model);
+    try stream.objectField("temperature");
+    try stream.write(req.temperature);
 
     try stream.objectField("memory_context");
     try stream.beginArray();
     for (req.memory_context) |m| {
         try stream.beginObject();
-        try stream.objectField("title"); try stream.write(m.title);
-        try stream.objectField("snippet"); try stream.write(m.snippet);
-        try stream.objectField("score"); try stream.write(m.score);
+        try stream.objectField("title");
+        try stream.write(m.title);
+        try stream.objectField("snippet");
+        try stream.write(m.snippet);
+        try stream.objectField("score");
+        try stream.write(m.score);
         try stream.endObject();
     }
     try stream.endArray();
@@ -86,10 +102,11 @@ fn buildFixtureJsonAlloc(a: std.mem.Allocator, req: provider.ChatRequest, conten
 
     try stream.objectField("response");
     try stream.beginObject();
-    try stream.objectField("content"); try stream.write(content);
+    try stream.objectField("content");
+    try stream.write(content);
     try stream.endObject();
 
     try stream.endObject();
 
-    return try stream.toOwnedSlice();
+    return try aw.toOwnedSlice();
 }

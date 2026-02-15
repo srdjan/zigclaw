@@ -89,15 +89,11 @@ pub const ValidatedConfig = struct {
 
     pub fn deinit(self: *ValidatedConfig, a: std.mem.Allocator) void {
         self.policy.deinit(a);
-
-        for (self.warnings) |w| {
-            a.free(w.key_path);
-            a.free(w.message);
-        }
-        a.free(self.warnings);
+        freeConfigStrings(a, &self.raw);
+        freeWarnings(a, self.warnings);
     }
 
-    pub fn print(self: ValidatedConfig, w: anytype) !void {
+    pub fn print(self: ValidatedConfig, w: *std.Io.Writer) !void {
         const sys = self.raw;
         try w.print(
             \\ValidatedConfig:
@@ -134,13 +130,15 @@ pub const ValidatedConfig = struct {
         });
     }
 
-    pub fn printNormalizedToml(self: ValidatedConfig, a: std.mem.Allocator, w: anytype) !void {
+    pub fn printNormalizedToml(self: ValidatedConfig, a: std.mem.Allocator, w: *std.Io.Writer) !void {
         // Stable ordering output (minimal TOML). DO NOT print secrets.
         try w.print("config_version = {d}\n\n", .{self.raw.config_version});
 
         // [capabilities]
         try w.writeAll("[capabilities]\n");
-        try w.print("active_preset = {s}\n\n", .{fmtTomlString(self.raw.capabilities.active_preset)});
+        try w.writeAll("active_preset = ");
+        try writeTomlString(w, self.raw.capabilities.active_preset);
+        try w.writeAll("\n\n");
 
         // presets sorted by name
         const presets = self.raw.capabilities.presets;
@@ -156,36 +154,56 @@ pub const ValidatedConfig = struct {
         for (idxs) |i| {
             const p = presets[i];
             try w.print("[capabilities.presets.{s}]\n", .{p.name});
-            try w.print("tools = {s}\n", .{fmtTomlStringArray(p.tools)});
+            try w.writeAll("tools = ");
+            try writeTomlStringArray(w, p.tools);
+            try w.writeAll("\n");
             try w.print("allow_network = {s}\n", .{if (p.allow_network) "true" else "false"});
-            try w.print("allow_write_paths = {s}\n\n", .{fmtTomlStringArray(p.allow_write_paths)});
+            try w.writeAll("allow_write_paths = ");
+            try writeTomlStringArray(w, p.allow_write_paths);
+            try w.writeAll("\n\n");
         }
 
-        
+
 // [observability]
 try w.writeAll("[observability]\n");
 try w.print("enabled = {s}\n", .{if (self.raw.observability.enabled) "true" else "false"});
-try w.print("dir = {s}\n", .{fmtTomlString(self.raw.observability.dir)});
+try w.writeAll("dir = ");
+try writeTomlString(w, self.raw.observability.dir);
+try w.writeAll("\n");
 try w.print("max_file_bytes = {d}\n", .{self.raw.observability.max_file_bytes});
 try w.print("max_files = {d}\n\n", .{self.raw.observability.max_files});
 
 // [security]
         try w.writeAll("[security]\n");
-        try w.print("workspace_root = {s}\n", .{fmtTomlString(self.raw.security.workspace_root)});
+        try w.writeAll("workspace_root = ");
+        try writeTomlString(w, self.raw.security.workspace_root);
+        try w.writeAll("\n");
         try w.print("max_request_bytes = {d}\n\n", .{self.raw.security.max_request_bytes});
 
         // [providers.primary]
         try w.writeAll("[providers.primary]\n");
-        try w.print("kind = {s}\n", .{fmtTomlString(@tagName(self.raw.provider_primary.kind))});
-        try w.print("model = {s}\n", .{fmtTomlString(self.raw.provider_primary.model)});
+        try w.writeAll("kind = ");
+        try writeTomlString(w, @tagName(self.raw.provider_primary.kind));
+        try w.writeAll("\n");
+        try w.writeAll("model = ");
+        try writeTomlString(w, self.raw.provider_primary.model);
+        try w.writeAll("\n");
         try w.print("temperature = {d}\n", .{self.raw.provider_primary.temperature});
-        try w.print("base_url = {s}\n", .{fmtTomlString(self.raw.provider_primary.base_url)});
-        try w.print("api_key_env = {s}\n\n", .{fmtTomlString(self.raw.provider_primary.api_key_env)});
+        try w.writeAll("base_url = ");
+        try writeTomlString(w, self.raw.provider_primary.base_url);
+        try w.writeAll("\n");
+        try w.writeAll("api_key_env = ");
+        try writeTomlString(w, self.raw.provider_primary.api_key_env);
+        try w.writeAll("\n\n");
 
         // [providers.fixtures]
         try w.writeAll("[providers.fixtures]\n");
-        try w.print("mode = {s}\n", .{fmtTomlString(@tagName(self.raw.provider_fixtures.mode))});
-        try w.print("dir = {s}\n\n", .{fmtTomlString(self.raw.provider_fixtures.dir)});
+        try w.writeAll("mode = ");
+        try writeTomlString(w, @tagName(self.raw.provider_fixtures.mode));
+        try w.writeAll("\n");
+        try w.writeAll("dir = ");
+        try writeTomlString(w, self.raw.provider_fixtures.dir);
+        try w.writeAll("\n\n");
 
         // [providers.reliable]
         try w.writeAll("[providers.reliable]\n");
@@ -194,32 +212,36 @@ try w.print("max_files = {d}\n\n", .{self.raw.observability.max_files});
 
         // [memory]
         try w.writeAll("[memory]\n");
-        try w.print("backend = {s}\n", .{fmtTomlString(@tagName(self.raw.memory.backend))});
-        try w.print("root = {s}\n\n", .{fmtTomlString(self.raw.memory.root)});
+        try w.writeAll("backend = ");
+        try writeTomlString(w, @tagName(self.raw.memory.backend));
+        try w.writeAll("\n");
+        try w.writeAll("root = ");
+        try writeTomlString(w, self.raw.memory.root);
+        try w.writeAll("\n\n");
 
         // [tools]
         try w.writeAll("[tools]\n");
-        try w.print("wasmtime_path = {s}\n", .{fmtTomlString(self.raw.tools.wasmtime_path)});
-        try w.print("plugin_dir = {s}\n", .{fmtTomlString(self.raw.tools.plugin_dir)});
+        try w.writeAll("wasmtime_path = ");
+        try writeTomlString(w, self.raw.tools.wasmtime_path);
+        try w.writeAll("\n");
+        try w.writeAll("plugin_dir = ");
+        try writeTomlString(w, self.raw.tools.plugin_dir);
+        try w.writeAll("\n");
     }
 };
 
-pub fn loadAndValidate(a: std.mem.Allocator, path: []const u8) !ValidatedConfig {
-    const file = std.fs.cwd().openFile(path, .{}) catch |e| {
+pub fn loadAndValidate(a: std.mem.Allocator, io: std.Io, path: []const u8) !ValidatedConfig {
+    const content = std.Io.Dir.cwd().readFileAlloc(io, path, a, std.Io.Limit.limited(1024 * 1024)) catch |e| {
         std.log.warn("config file not found ({s}); using defaults: {any}", .{ path, e });
         return validate(a, Config{}, &.{});
     };
-    defer file.close();
-
-    const max = 1024 * 1024;
-    const content = try file.readToEndAlloc(a, max);
     defer a.free(content);
 
-    const parsed = try tomlParseKeyMap(a, content);
+    var parsed = try tomlParseKeyMap(a, content);
     defer parsed.deinit(a);
 
-    const built = try buildTypedConfig(a, parsed);
-    defer built.deinit(a);
+    var built = try buildTypedConfig(a, parsed);
+    errdefer built.deinit(a);
 
     return validate(a, built.cfg, built.warnings);
 }
@@ -279,7 +301,7 @@ const ParseResult = struct {
 fn tomlParseKeyMap(a: std.mem.Allocator, input: []const u8) !ParseResult {
     var km = KeyMap.init(a);
 
-    var table_prefix = std.ArrayList([]const u8).init(a);
+    var table_prefix = std.array_list.Managed([]const u8).init(a);
     defer table_prefix.deinit();
 
     var lines = std.mem.splitScalar(u8, input, '\n');
@@ -339,7 +361,9 @@ fn joinKeyPath(a: std.mem.Allocator, prefix: []const []const u8, leaf: []const u
     return out;
 }
 
-fn parseValue(a: std.mem.Allocator, raw: []const u8) !Value {
+const ParseError = error{ InvalidTomlValue, InvalidString, InvalidEscape, InvalidArray, InvalidFloat, InvalidInt, OutOfMemory };
+
+fn parseValue(a: std.mem.Allocator, raw: []const u8) ParseError!Value {
     const t = std.mem.trim(u8, raw, " \t\r");
     if (t.len == 0) return error.InvalidTomlValue;
 
@@ -357,11 +381,11 @@ fn parseValue(a: std.mem.Allocator, raw: []const u8) !Value {
     }
 }
 
-fn parseBasicString(a: std.mem.Allocator, t: []const u8) ![]const u8 {
+fn parseBasicString(a: std.mem.Allocator, t: []const u8) ParseError![]const u8 {
     if (t.len < 2 or t[0] != '"' or t[t.len - 1] != '"') return error.InvalidString;
     const inner = t[1 .. t.len - 1];
 
-    var out = std.ArrayList(u8).init(a);
+    var out = std.array_list.Managed(u8).init(a);
     errdefer out.deinit();
 
     var i: usize = 0;
@@ -387,11 +411,11 @@ fn parseBasicString(a: std.mem.Allocator, t: []const u8) ![]const u8 {
     return try out.toOwnedSlice();
 }
 
-fn parseArray(a: std.mem.Allocator, t: []const u8) ![]Value {
+fn parseArray(a: std.mem.Allocator, t: []const u8) ParseError![]Value {
     if (t.len < 2 or t[0] != '[' or t[t.len - 1] != ']') return error.InvalidArray;
     var inner = std.mem.trim(u8, t[1 .. t.len - 1], " \t\r");
 
-    var items = std.ArrayList(Value).init(a);
+    var items = std.array_list.Managed(Value).init(a);
     errdefer {
         for (items.items) |*v| v.deinit(a);
         items.deinit();
@@ -429,18 +453,16 @@ const BuildResult = struct {
     warnings: []Warning,
 
     pub fn deinit(self: *BuildResult, a: std.mem.Allocator) void {
-        for (self.warnings) |w| {
-            a.free(w.key_path);
-            a.free(w.message);
-        }
-        a.free(self.warnings);
+        freeConfigStrings(a, &self.cfg);
+        freeWarnings(a, self.warnings);
     }
 };
 
 fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
     var cfg = Config{};
+    errdefer freeConfigStrings(a, &cfg);
 
-    var warns = std.ArrayList(Warning).init(a);
+    var warns = std.array_list.Managed(Warning).init(a);
     errdefer {
         for (warns.items) |w| { a.free(w.key_path); a.free(w.message); }
         warns.deinit();
@@ -591,7 +613,7 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
     }
 
     // Build presets
-    var names = std.ArrayList([]const u8).init(a);
+    var names = std.array_list.Managed([]const u8).init(a);
     defer names.deinit();
     {
         var itn = preset_names.keyIterator();
@@ -601,15 +623,9 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
         fn lt(_: void, a_: []const u8, b_: []const u8) bool { return std.mem.lessThan(u8, a_, b_); }
     }.lt);
 
-    var presets = std.ArrayList(PresetConfig).init(a);
+    var presets = std.array_list.Managed(PresetConfig).init(a);
     errdefer {
-        for (presets.items) |p| {
-            a.free(p.name);
-            for (p.tools) |s| a.free(s);
-            a.free(p.tools);
-            for (p.allow_write_paths) |s| a.free(s);
-            a.free(p.allow_write_paths);
-        }
+        for (presets.items) |p| freePreset(a, p);
         presets.deinit();
     }
 
@@ -625,9 +641,9 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
         const allow_net_val = parsed.keys.map.get(allow_net_key);
         const writes_val = parsed.keys.map.get(writes_key);
 
-        const tools = if (tools_val) |tv| try coerceStringArrayDup(a, tv) else &.{};
+        const tools = if (tools_val) |tv| try coerceStringArrayDup(a, tv) else try dupeStrs(a, &.{});
         const allow_network = if (allow_net_val) |av| try coerceBool(av) else false;
-        const writes = if (writes_val) |wv| try coerceStringArrayDup(a, wv) else &.{};
+        const writes = if (writes_val) |wv| try coerceStringArrayDup(a, wv) else try dupeStrs(a, &.{});
 
         try presets.append(.{
             .name = try a.dupe(u8, n),
@@ -642,7 +658,7 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
             .name = try a.dupe(u8, "readonly"),
             .tools = try dupeStrs(a, &.{"echo"}),
             .allow_network = false,
-            .allow_write_paths = &.{},
+            .allow_write_paths = try dupeStrs(a, &.{}),
         });
     }
 
@@ -651,7 +667,7 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
     return .{ .cfg = cfg, .warnings = try warns.toOwnedSlice() };
 }
 
-fn unknownKeyWarn(a: std.mem.Allocator, warns: *std.ArrayList(Warning), k: []const u8) !void {
+fn unknownKeyWarn(a: std.mem.Allocator, warns: *std.array_list.Managed(Warning), k: []const u8) !void {
     try warns.append(.{ .key_path = try a.dupe(u8, k), .message = try a.dupe(u8, "unknown key (ignored)") });
 }
 
@@ -693,7 +709,7 @@ fn coerceF64(v: Value) !f64 {
 fn coerceStringArrayDup(a: std.mem.Allocator, v: Value) ![]const []const u8 {
     return switch (v) {
         .array => |arr| {
-            var out = std.ArrayList([]const u8).init(a);
+            var out = std.array_list.Managed([]const u8).init(a);
             errdefer {
                 for (out.items) |s| a.free(s);
                 out.deinit();
@@ -709,7 +725,7 @@ fn coerceStringArrayDup(a: std.mem.Allocator, v: Value) ![]const []const u8 {
 }
 
 fn dupeStrs(a: std.mem.Allocator, items: []const []const u8) ![]const []const u8 {
-    var out = std.ArrayList([]const u8).init(a);
+    var out = std.array_list.Managed([]const u8).init(a);
     errdefer {
         for (out.items) |s| a.free(s);
         out.deinit();
@@ -722,38 +738,71 @@ fn dupeStrs(a: std.mem.Allocator, items: []const []const u8) ![]const []const u8
 // Small TOML formatting helpers
 // -----------------------------
 
-fn fmtTomlString(s: []const u8) TomlStringFmt {
-    return .{ .s = s };
-}
-const TomlStringFmt = struct {
-    s: []const u8,
-    pub fn format(self: TomlStringFmt, comptime _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
-        try w.writeByte('"');
-        for (self.s) |c| {
-            switch (c) {
-                '"' => try w.writeAll("\\\""),
-                '\\' => try w.writeAll("\\\\"),
-                '\n' => try w.writeAll("\\n"),
-                '\r' => try w.writeAll("\\r"),
-                '\t' => try w.writeAll("\\t"),
-                else => try w.writeByte(c),
-            }
-        }
-        try w.writeByte('"');
-    }
-};
+/// Free all heap-owned strings and presets in a Config.
+/// Uses pointer comparison against defaults to skip static (non-heap) fields.
+fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
+    const d = Config{};
 
-fn fmtTomlStringArray(items: []const []const u8) TomlStringArrayFmt {
-    return .{ .items = items };
-}
-const TomlStringArrayFmt = struct {
-    items: []const []const u8,
-    pub fn format(self: TomlStringArrayFmt, comptime _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
-        try w.writeByte('[');
-        for (self.items, 0..) |s, i| {
-            if (i != 0) try w.writeAll(", ");
-            try fmtTomlString(s).format("", .{}, w);
-        }
-        try w.writeByte(']');
+    // Simple string fields - only free if pointer differs from compile-time default
+    inline for (.{
+        .{ &cfg.capabilities.active_preset, &d.capabilities.active_preset },
+        .{ &cfg.observability.dir, &d.observability.dir },
+        .{ &cfg.security.workspace_root, &d.security.workspace_root },
+        .{ &cfg.tools.wasmtime_path, &d.tools.wasmtime_path },
+        .{ &cfg.tools.plugin_dir, &d.tools.plugin_dir },
+        .{ &cfg.provider_primary.model, &d.provider_primary.model },
+        .{ &cfg.provider_primary.base_url, &d.provider_primary.base_url },
+        .{ &cfg.provider_primary.api_key, &d.provider_primary.api_key },
+        .{ &cfg.provider_primary.api_key_env, &d.provider_primary.api_key_env },
+        .{ &cfg.provider_fixtures.dir, &d.provider_fixtures.dir },
+        .{ &cfg.memory.root, &d.memory.root },
+    }) |pair| {
+        if (pair[0].*.ptr != pair[1].*.ptr) a.free(pair[0].*);
     }
-};
+
+    // Presets - only free if pointer differs from default empty slice
+    if (cfg.capabilities.presets.ptr != d.capabilities.presets.ptr) {
+        for (cfg.capabilities.presets) |p| freePreset(a, p);
+        a.free(cfg.capabilities.presets);
+    }
+}
+
+fn freePreset(a: std.mem.Allocator, p: PresetConfig) void {
+    a.free(p.name);
+    for (p.tools) |s| a.free(s);
+    a.free(p.tools);
+    for (p.allow_write_paths) |s| a.free(s);
+    a.free(p.allow_write_paths);
+}
+
+fn freeWarnings(a: std.mem.Allocator, warnings: []Warning) void {
+    for (warnings) |w| {
+        a.free(w.key_path);
+        a.free(w.message);
+    }
+    if (warnings.len > 0) a.free(warnings);
+}
+
+fn writeTomlString(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+    try w.writeByte('"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            else => try w.writeByte(c),
+        }
+    }
+    try w.writeByte('"');
+}
+
+fn writeTomlStringArray(w: *std.Io.Writer, items: []const []const u8) std.Io.Writer.Error!void {
+    try w.writeByte('[');
+    for (items, 0..) |s, i| {
+        if (i != 0) try w.writeAll(", ");
+        try writeTomlString(w, s);
+    }
+    try w.writeByte(']');
+}

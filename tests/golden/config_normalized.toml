@@ -1,11 +1,5 @@
 config_version = 1
 
-[observability]
-enabled = true
-dir = "./.zigclaw/logs"
-max_file_bytes = 1048576
-max_files = 5
-
 [capabilities]
 active_preset = "dev"
 
@@ -18,6 +12,12 @@ allow_write_paths = ["./.zigclaw", "./tmp"]
 tools = ["echo"]
 allow_network = false
 allow_write_paths = []
+
+[observability]
+enabled = true
+dir = "./.zigclaw/logs"
+max_file_bytes = 1048576
+max_files = 5
 
 [security]
 workspace_root = "."

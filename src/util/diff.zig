@@ -1,8 +1,8 @@
 const std = @import("std");
 
 pub fn diffTextAlloc(a: std.mem.Allocator, left: []const u8, right: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(a);
-    errdefer out.deinit();
+    var aw: std.Io.Writer.Allocating = .init(a);
+    errdefer aw.deinit();
 
     var la = std.mem.splitScalar(u8, left, '\n');
     var lb = std.mem.splitScalar(u8, right, '\n');
@@ -16,19 +16,19 @@ pub fn diffTextAlloc(a: std.mem.Allocator, left: []const u8, right: []const u8) 
             const al = a_line.?;
             const bl = b_line.?;
             if (std.mem.eql(u8, al, bl)) {
-                try out.writer().print(" {s}\n", .{al});
+                try aw.writer.print(" {s}\n", .{al});
             } else {
-                try out.writer().print("-{s}\n", .{al});
-                try out.writer().print("+{s}\n", .{bl});
+                try aw.writer.print("-{s}\n", .{al});
+                try aw.writer.print("+{s}\n", .{bl});
             }
             continue;
         }
         if (a_line != null) {
-            try out.writer().print("-{s}\n", .{a_line.?});
+            try aw.writer.print("-{s}\n", .{a_line.?});
         } else {
-            try out.writer().print("+{s}\n", .{b_line.?});
+            try aw.writer.print("+{s}\n", .{b_line.?});
         }
     }
 
-    return try out.toOwnedSlice();
+    return try aw.toOwnedSlice();
 }

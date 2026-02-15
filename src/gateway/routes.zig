@@ -14,7 +14,7 @@ pub const Resp = struct {
     }
 };
 
-pub fn handle(a: std.mem.Allocator, app: *App, cfg: config.ValidatedConfig, req: http.RequestOwned, token: []const u8, request_id: []const u8) !Resp {
+pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.ValidatedConfig, req: http.RequestOwned, token: []const u8, request_id: []const u8) !Resp {
     if (std.mem.eql(u8, req.target, "/health")) {
         const body = try jsonObj(a, .{
             .request_id = request_id,
@@ -29,7 +29,7 @@ pub fn handle(a: std.mem.Allocator, app: *App, cfg: config.ValidatedConfig, req:
     }
 
     if (std.mem.eql(u8, req.method, "GET") and std.mem.eql(u8, req.target, "/v1/tools")) {
-        const tools_json = try tools_rt.listToolsJsonAlloc(a, cfg.raw.tools.plugin_dir);
+        const tools_json = try tools_rt.listToolsJsonAlloc(a, io, cfg.raw.tools.plugin_dir);
         defer a.free(tools_json);
         const body = try jsonObj(a, .{ .request_id = request_id, .tools_json = tools_json });
         return .{ .status = 200, .body = body };
@@ -38,7 +38,7 @@ pub fn handle(a: std.mem.Allocator, app: *App, cfg: config.ValidatedConfig, req:
     if (std.mem.eql(u8, req.method, "GET") and std.mem.startsWith(u8, req.target, "/v1/tools/")) {
         const tool = req.target["/v1/tools/".len..];
         if (tool.len == 0) return try jsonError(a, 400, request_id, "tool name required");
-        const manifest_json = try tools_rt.describeToolJsonAlloc(a, cfg.raw.tools.plugin_dir, tool);
+        const manifest_json = try tools_rt.describeToolJsonAlloc(a, io, cfg.raw.tools.plugin_dir, tool);
         defer a.free(manifest_json);
         const body = try jsonObj(a, .{ .request_id = request_id, .manifest_json = manifest_json });
         return .{ .status = 200, .body = body };
@@ -57,7 +57,7 @@ pub fn handle(a: std.mem.Allocator, app: *App, cfg: config.ValidatedConfig, req:
         const args_json = try stringifyJsonValue(a, args_v);
         defer a.free(args_json);
 
-        const res = app.runToolWithRequestId(a, cfg, request_id, tool, args_json) catch |e| {
+        var res = app.runToolWithRequestId(a, cfg, request_id, tool, args_json) catch |e| {
             return jsonError(a, 500, request_id, @errorName(e));
         };
         defer res.deinit(a);
@@ -78,7 +78,7 @@ pub fn handle(a: std.mem.Allocator, app: *App, cfg: config.ValidatedConfig, req:
         if (msg_v != .string) return jsonError(a, 400, request_id, "'message' must be string");
         const msg = msg_v.string;
 
-        const content = runAgentOnce(a, cfg, msg, request_id) catch |e| {
+        const content = runAgentOnce(a, io, cfg, msg, request_id) catch |e| {
             return jsonError(a, 500, request_id, @errorName(e));
         };
         defer a.free(content);
@@ -99,10 +99,11 @@ fn isAuthorized(req: http.RequestOwned, token: []const u8) bool {
 }
 
 fn stringifyJsonValue(a: std.mem.Allocator, v: std.json.Value) ![]u8 {
-    var stream = std.json.StringifyStream.init(a);
-    defer stream.deinit();
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
     try stream.write(v);
-    return try stream.toOwnedSlice();
+    return try aw.toOwnedSlice();
 }
 
 fn jsonError(a: std.mem.Allocator, status: u16, request_id: []const u8, msg: []const u8) !Resp {
@@ -111,19 +112,20 @@ fn jsonError(a: std.mem.Allocator, status: u16, request_id: []const u8, msg: []c
 }
 
 fn jsonObj(a: std.mem.Allocator, payload: anytype) ![]u8 {
-    var stream = std.json.StringifyStream.init(a);
-    defer stream.deinit();
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
     try stream.write(payload);
-    return try stream.toOwnedSlice();
+    return try aw.toOwnedSlice();
 }
 
 // Agent runner that returns response content
-fn runAgentOnce(a: std.mem.Allocator, cfg: config.ValidatedConfig, message: []const u8, request_id: []const u8) ![]u8 {
+fn runAgentOnce(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, message: []const u8, request_id: []const u8) ![]u8 {
     const provider_factory = @import("../providers/factory.zig");
     const bundle = @import("../agent/bundle.zig");
-    const obs = @import("../obs/logger.zig");
+    const obs_mod = @import("../obs/logger.zig");
 
-    var logger = obs.Logger.fromConfig(cfg);
+    var logger = obs_mod.Logger.fromConfig(cfg, io);
 
     var provider = try provider_factory.build(a, cfg);
     defer provider.deinit(a);
@@ -132,7 +134,7 @@ fn runAgentOnce(a: std.mem.Allocator, cfg: config.ValidatedConfig, message: []co
     defer arena.deinit();
     const ta = arena.allocator();
 
-    var b = try bundle.build(ta, cfg, message);
+    var b = try bundle.build(ta, io, cfg, message);
     defer b.deinit(ta);
 
     logger.logJson(ta, .agent_run, request_id, .{
@@ -148,7 +150,7 @@ fn runAgentOnce(a: std.mem.Allocator, cfg: config.ValidatedConfig, message: []co
         .status = "start",
     });
 
-    const resp = provider.chat(ta, .{
+    const resp = provider.chat(ta, io, .{
         .system = b.system,
         .user = message,
         .model = cfg.raw.provider_primary.model,

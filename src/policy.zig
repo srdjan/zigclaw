@@ -61,7 +61,7 @@ pub const Policy = struct {
         const ws = try a.dupe(u8, workspace_root);
         errdefer a.free(ws);
 
-        var presets = std.ArrayList(Preset).init(a);
+        var presets = std.array_list.Managed(Preset).init(a);
         errdefer {
             for (presets.items) |p| {
                 a.free(p.name);
@@ -153,22 +153,28 @@ pub const Policy = struct {
             try std.fmt.allocPrint(a, "denied: tool not in preset '{s}'", .{self.active.name});
         defer a.free(reason);
 
-        var stream = std.json.StringifyStream.init(a);
-        defer stream.deinit();
+        var aw: std.Io.Writer.Allocating = .init(a);
+        defer aw.deinit();
+
+        var stream: std.json.Stringify = .{ .writer = &aw.writer };
 
         try stream.beginObject();
-        try stream.objectField("tool"); try stream.write(tool);
-        try stream.objectField("allowed"); try stream.write(allowed);
-        try stream.objectField("reason"); try stream.write(reason);
-        try stream.objectField("policy_hash"); try stream.write(self.policyHash());
+        try stream.objectField("tool");
+        try stream.write(tool);
+        try stream.objectField("allowed");
+        try stream.write(allowed);
+        try stream.objectField("reason");
+        try stream.write(reason);
+        try stream.objectField("policy_hash");
+        try stream.write(self.policyHash());
         try stream.endObject();
 
-        return try stream.toOwnedSlice();
+        return try aw.toOwnedSlice();
     }
 
     pub fn makeMounts(self: Policy, a: std.mem.Allocator) ![]Mount {
         // Always mount workspace as read-only at /workspace
-        var mounts = std.ArrayList(Mount).init(a);
+        var mounts = std.array_list.Managed(Mount).init(a);
         errdefer mounts.deinit();
 
         try mounts.append(.{ .host_path = self.workspace_root, .guest_path = "/workspace", .read_only = true });
@@ -185,7 +191,7 @@ pub const Policy = struct {
 };
 
 fn dupeStrSlice(a: std.mem.Allocator, items: []const []const u8) ![]const []const u8 {
-    var out = std.ArrayList([]const u8).init(a);
+    var out = std.array_list.Managed([]const u8).init(a);
     errdefer {
         for (out.items) |s| a.free(s);
         out.deinit();

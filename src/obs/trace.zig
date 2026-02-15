@@ -9,9 +9,9 @@ pub const RequestId = struct {
     }
 };
 
-pub fn newRequestId() RequestId {
+pub fn newRequestId(io: std.Io) RequestId {
     var raw: [16]u8 = undefined;
-    std.crypto.random.bytes(&raw);
+    io.random(&raw);
 
     var out: [32]u8 = undefined;
     hash.hexBuf(&raw, &out);

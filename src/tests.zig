@@ -520,6 +520,119 @@ test "queue cancel processing request becomes pending then canceled by worker" {
     }
 }
 
+test "queue retry scheduling uses backoff timestamp when jitter is zero" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_queue_retry_delay";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 1;
+    vcq.raw.queue.retry_backoff_ms = 4000;
+    vcq.raw.queue.retry_jitter_pct = 0;
+    vcq.raw.observability.enabled = false;
+
+    const rid = try queue_worker.enqueueAgent(a, io, vcq, "retry me", "bad_agent", "req_retry_delay_test");
+    defer a.free(rid);
+
+    const started_ms = clockNowMs(io);
+    try queue_worker.runWorker(a, io, vcq, .{ .once = true });
+    const ended_ms = clockNowMs(io);
+
+    const incoming_dir = try std.fs.path.join(a, &.{ queue_dir, "incoming" });
+    defer a.free(incoming_dir);
+    try std.testing.expectEqual(@as(usize, 1), try countJsonFiles(io, incoming_dir));
+
+    const retry_name = try firstJsonFileNameAlloc(a, io, incoming_dir);
+    defer if (retry_name) |n| a.free(n);
+    try std.testing.expect(retry_name != null);
+    try std.testing.expect(std.mem.indexOf(u8, retry_name.?, "_req_retry_delay_test_retry1.json") != null);
+
+    const due_ms = try parseLeadingTimestampMs(retry_name.?);
+    try std.testing.expect(due_ms >= started_ms + 4000);
+    try std.testing.expect(due_ms <= ended_ms + 4000 + 50);
+}
+
+test "queue metrics reports ready, delayed, processing, and cancel markers" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_queue_metrics";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.observability.enabled = false;
+
+    const rid = try queue_worker.enqueueAgent(a, io, vcq, "metrics", null, "req_metrics_test");
+    defer a.free(rid);
+
+    const incoming_dir = try std.fs.path.join(a, &.{ queue_dir, "incoming" });
+    defer a.free(incoming_dir);
+    const processing_dir = try std.fs.path.join(a, &.{ queue_dir, "processing" });
+    defer a.free(processing_dir);
+
+    const queued_name = try firstJsonFileNameAlloc(a, io, incoming_dir);
+    defer if (queued_name) |n| a.free(n);
+    try std.testing.expect(queued_name != null);
+    const from = try std.fs.path.join(a, &.{ incoming_dir, queued_name.? });
+    defer a.free(from);
+    const to = try std.fs.path.join(a, &.{ processing_dir, queued_name.? });
+    defer a.free(to);
+    try std.Io.Dir.rename(std.Io.Dir.cwd(), from, std.Io.Dir.cwd(), to, io);
+
+    const cancel_json = try queue_worker.cancelRequestJsonAlloc(a, io, vcq, "req_metrics_test");
+    defer a.free(cancel_json);
+
+    const metrics_json = try queue_worker.metricsJsonAlloc(a, io, vcq);
+    defer a.free(metrics_json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, metrics_json, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const obj = parsed.value.object;
+
+    const processing_v = obj.get("processing") orelse return error.BadGolden;
+    try std.testing.expect(processing_v == .integer);
+    try std.testing.expectEqual(@as(i64, 1), processing_v.integer);
+
+    const cancel_markers_v = obj.get("cancel_markers") orelse return error.BadGolden;
+    try std.testing.expect(cancel_markers_v == .integer);
+    try std.testing.expectEqual(@as(i64, 1), cancel_markers_v.integer);
+
+    const incoming_total_v = obj.get("incoming_total") orelse return error.BadGolden;
+    try std.testing.expect(incoming_total_v == .integer);
+    try std.testing.expectEqual(@as(i64, 0), incoming_total_v.integer);
+}
+
 const tool_manifest = @import("tools/manifest.zig");
 const tool_schema = @import("tools/schema.zig");
 

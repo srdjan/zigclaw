@@ -137,6 +137,16 @@ Explain whether a tool is allowed:
 zig-out/bin/zigclaw policy explain --tool fs_read --config zigclaw.toml
 ```
 
+Explain mount accessibility and mode (read-only vs writable):
+```sh
+zig-out/bin/zigclaw policy explain --mount ./tmp/work --config zigclaw.toml
+```
+
+Explain whether a command string passes the safety allowlist:
+```sh
+zig-out/bin/zigclaw policy explain --command "wasmtime run --mapdir /workspace::/workspace plugin.wasm" --config zigclaw.toml
+```
+
 Decision logs are written as JSONL to `./.zigclaw/decisions.jsonl`.
 
 

@@ -263,8 +263,22 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (std.mem.eql(u8, sub, "explain")) {
-            const tool = flagValue(argv, "--tool") orelse return error.InvalidArgs;
-            const json = try validated.policy.explainToolJsonAlloc(a, tool);
+            const tool = flagValue(argv, "--tool");
+            const mount = flagValue(argv, "--mount");
+            const command = flagValue(argv, "--command");
+
+            var selected: u8 = 0;
+            if (tool != null) selected += 1;
+            if (mount != null) selected += 1;
+            if (command != null) selected += 1;
+            if (selected != 1) return error.InvalidArgs;
+
+            const json = if (tool) |t|
+                try validated.policy.explainToolJsonAlloc(a, t)
+            else if (mount) |m|
+                try validated.policy.explainMountJsonAlloc(a, m)
+            else
+                try validated.policy.explainCommandJsonAlloc(a, command.?);
             defer a.free(json);
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);

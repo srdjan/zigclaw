@@ -1,6 +1,7 @@
 const std = @import("std");
 const cfg = @import("config.zig");
 const hash_mod = @import("obs/hash.zig");
+const commands = @import("security/commands.zig");
 
 pub const Mount = struct {
     host_path: []const u8,
@@ -100,7 +101,10 @@ pub const Policy = struct {
         const active_name = caps.active_preset;
         var active: ?Preset = null;
         for (presets_slice) |p| {
-            if (std.mem.eql(u8, p.name, active_name)) { active = p; break; }
+            if (std.mem.eql(u8, p.name, active_name)) {
+                active = p;
+                break;
+            }
         }
         if (active == null) active = presets_slice[0];
 
@@ -172,6 +176,57 @@ pub const Policy = struct {
         return try aw.toOwnedSlice();
     }
 
+    pub fn explainMountJsonAlloc(self: Policy, a: std.mem.Allocator, host_path: []const u8) ![]u8 {
+        const explain = try self.explainMountAlloc(a, host_path);
+        defer explain.deinit(a);
+
+        var aw: std.Io.Writer.Allocating = .init(a);
+        defer aw.deinit();
+        var stream: std.json.Stringify = .{ .writer = &aw.writer };
+
+        try stream.beginObject();
+        try stream.objectField("mount");
+        try stream.write(host_path);
+        try stream.objectField("allowed");
+        try stream.write(explain.allowed);
+        try stream.objectField("reason");
+        try stream.write(explain.reason);
+        try stream.objectField("policy_hash");
+        try stream.write(self.policyHash());
+        if (explain.allowed) {
+            try stream.objectField("guest_path");
+            try stream.write(explain.guest_path.?);
+            try stream.objectField("read_only");
+            try stream.write(explain.read_only.?);
+        }
+        try stream.endObject();
+        return try aw.toOwnedSlice();
+    }
+
+    pub fn explainCommandJsonAlloc(self: Policy, a: std.mem.Allocator, cmd: []const u8) ![]u8 {
+        const allowed = commands.isCommandSafe(cmd);
+        const reason = if (allowed)
+            "allowed: command matches safe allowlist"
+        else
+            "denied: command contains unsafe bytes";
+
+        var aw: std.Io.Writer.Allocating = .init(a);
+        defer aw.deinit();
+        var stream: std.json.Stringify = .{ .writer = &aw.writer };
+
+        try stream.beginObject();
+        try stream.objectField("command");
+        try stream.write(cmd);
+        try stream.objectField("allowed");
+        try stream.write(allowed);
+        try stream.objectField("reason");
+        try stream.write(reason);
+        try stream.objectField("policy_hash");
+        try stream.write(self.policyHash());
+        try stream.endObject();
+        return try aw.toOwnedSlice();
+    }
+
     pub fn makeMounts(self: Policy, a: std.mem.Allocator) ![]Mount {
         // Always mount workspace as read-only at /workspace
         var mounts = std.array_list.Managed(Mount).init(a);
@@ -187,6 +242,53 @@ pub const Policy = struct {
         }
 
         return try mounts.toOwnedSlice();
+    }
+
+    const MountExplain = struct {
+        allowed: bool = false,
+        read_only: ?bool = null,
+        guest_path: ?[]u8 = null,
+        reason: []u8,
+
+        fn deinit(self: MountExplain, a: std.mem.Allocator) void {
+            if (self.guest_path) |p| a.free(p);
+            a.free(self.reason);
+        }
+    };
+
+    fn explainMountAlloc(self: Policy, a: std.mem.Allocator, host_path: []const u8) !MountExplain {
+        if (host_path.len == 0) {
+            return .{
+                .reason = try a.dupe(u8, "denied: empty mount path"),
+            };
+        }
+
+        for (self.active.allow_write_paths) |wp| {
+            if (pathWithin(host_path, wp)) {
+                const base = basename(wp);
+                const guest_root = try std.fmt.allocPrint(a, "/write/{s}", .{base});
+                defer a.free(guest_root);
+                return .{
+                    .allowed = true,
+                    .read_only = false,
+                    .guest_path = try mapGuestPathAlloc(a, host_path, wp, guest_root),
+                    .reason = try std.fmt.allocPrint(a, "allowed writable by preset '{s}' path '{s}'", .{ self.active.name, wp }),
+                };
+            }
+        }
+
+        if (pathWithin(host_path, self.workspace_root)) {
+            return .{
+                .allowed = true,
+                .read_only = true,
+                .guest_path = try mapGuestPathAlloc(a, host_path, self.workspace_root, "/workspace"),
+                .reason = try std.fmt.allocPrint(a, "allowed read-only under workspace_root '{s}'", .{self.workspace_root}),
+            };
+        }
+
+        return .{
+            .reason = try std.fmt.allocPrint(a, "denied: path is outside workspace_root '{s}' and preset writable paths", .{self.workspace_root}),
+        };
     }
 };
 
@@ -207,6 +309,62 @@ fn basename(path: []const u8) []const u8 {
         if (c == '/' or c == '\\') return path[i..];
     }
     return path;
+}
+
+fn normalizePathForCompare(path: []const u8) []const u8 {
+    var s = std.mem.trim(u8, path, " \t\r\n");
+    while (std.mem.startsWith(u8, s, "./")) s = s[2..];
+
+    while (s.len > 1 and s[s.len - 1] == '/') s = s[0 .. s.len - 1];
+    return s;
+}
+
+fn isParentEscape(path: []const u8) bool {
+    if (std.mem.eql(u8, path, "..")) return true;
+    if (std.mem.startsWith(u8, path, "../")) return true;
+    return false;
+}
+
+fn pathWithin(path: []const u8, root: []const u8) bool {
+    const p = normalizePathForCompare(path);
+    const r = normalizePathForCompare(root);
+
+    // Relative workspace root ("."): allow any non-parent-escape relative path.
+    if (r.len == 0 or std.mem.eql(u8, r, ".")) {
+        if (p.len == 0 or std.mem.eql(u8, p, ".")) return true;
+        if (std.mem.startsWith(u8, p, "/")) return false;
+        if (isParentEscape(p)) return false;
+        return true;
+    }
+
+    if (std.mem.eql(u8, p, r)) return true;
+
+    if (p.len > r.len and std.mem.startsWith(u8, p, r)) {
+        if (r.len == 1 and r[0] == '/') return true;
+        return p[r.len] == '/';
+    }
+    return false;
+}
+
+fn mapGuestPathAlloc(a: std.mem.Allocator, host_path: []const u8, host_root: []const u8, guest_root: []const u8) ![]u8 {
+    const p = normalizePathForCompare(host_path);
+    const r = normalizePathForCompare(host_root);
+
+    if (r.len == 0 or std.mem.eql(u8, r, ".")) {
+        if (p.len == 0 or std.mem.eql(u8, p, ".")) return try a.dupe(u8, guest_root);
+        return try std.fmt.allocPrint(a, "{s}/{s}", .{ guest_root, p });
+    }
+
+    if (r.len == 1 and r[0] == '/') {
+        if (std.mem.eql(u8, p, "/")) return try a.dupe(u8, guest_root);
+        return try std.fmt.allocPrint(a, "{s}{s}", .{ guest_root, p });
+    }
+
+    if (std.mem.eql(u8, p, r)) return try a.dupe(u8, guest_root);
+    if (p.len > r.len and std.mem.startsWith(u8, p, r) and p[r.len] == '/') {
+        return try std.fmt.allocPrint(a, "{s}{s}", .{ guest_root, p[r.len..] });
+    }
+    return try a.dupe(u8, guest_root);
 }
 
 // ---- policy hash (sha256 hex) ----

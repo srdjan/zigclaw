@@ -261,6 +261,18 @@ test "queue enqueue-agent then worker once produces outgoing result" {
     defer a.free(rid);
     try std.testing.expectEqualStrings("req_queue_test", rid);
 
+    const status_queued = try queue_worker.statusJsonAlloc(a, io, vcq, "req_queue_test", false);
+    defer a.free(status_queued);
+    {
+        var parsed_status = try std.json.parseFromSlice(std.json.Value, a, status_queued, .{});
+        defer parsed_status.deinit();
+        try std.testing.expect(parsed_status.value == .object);
+        const obj = parsed_status.value.object;
+        const state_v = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state_v == .string);
+        try std.testing.expectEqualStrings("queued", state_v.string);
+    }
+
     const incoming_dir = try std.fs.path.join(a, &.{ queue_dir, "incoming" });
     defer a.free(incoming_dir);
     const processing_dir = try std.fs.path.join(a, &.{ queue_dir, "processing" });
@@ -297,6 +309,55 @@ test "queue enqueue-agent then worker once produces outgoing result" {
     const ok_v = obj.get("ok") orelse return error.BadGolden;
     try std.testing.expect(ok_v == .bool);
     try std.testing.expect(ok_v.bool);
+
+    const status_done = try queue_worker.statusJsonAlloc(a, io, vcq, "req_queue_test", true);
+    defer a.free(status_done);
+    {
+        var parsed_status2 = try std.json.parseFromSlice(std.json.Value, a, status_done, .{});
+        defer parsed_status2.deinit();
+        try std.testing.expect(parsed_status2.value == .object);
+        const obj2 = parsed_status2.value.object;
+        const state_v2 = obj2.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state_v2 == .string);
+        try std.testing.expectEqualStrings("completed", state_v2.string);
+        const result_v = obj2.get("result_json") orelse return error.BadGolden;
+        try std.testing.expect(result_v == .string);
+        try std.testing.expect(std.mem.indexOf(u8, result_v.string, "\"ok\":true") != null);
+    }
+}
+
+test "queue enqueue-agent rejects duplicate request_id" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_queue_dupe";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.observability.enabled = false;
+
+    const first = try queue_worker.enqueueAgent(a, io, vcq, "hello", null, "req_dupe_test");
+    defer a.free(first);
+
+    try std.testing.expectError(
+        error.DuplicateRequestId,
+        queue_worker.enqueueAgent(a, io, vcq, "hello again", null, "req_dupe_test"),
+    );
 }
 
 const tool_manifest = @import("tools/manifest.zig");

@@ -10,6 +10,8 @@ pub const WorkerOptions = struct {
     poll_ms_override: ?u32 = null,
 };
 
+const QueueState = enum { queued, processing, completed, not_found };
+
 const JobKind = enum { agent };
 
 const Job = struct {
@@ -48,6 +50,8 @@ pub fn enqueueAgent(
         try a.dupe(u8, trace.newRequestId(io).slice());
     errdefer a.free(rid);
 
+    if (try requestIdExists(io, resolved, rid)) return error.DuplicateRequestId;
+
     var job = Job{
         .request_id = rid,
         .created_at_ms = nowMs(io),
@@ -70,6 +74,75 @@ pub fn enqueueAgent(
     try writeFile(io, path, payload);
 
     return rid;
+}
+
+pub fn statusJsonAlloc(
+    a: std.mem.Allocator,
+    io: std.Io,
+    cfg: config.ValidatedConfig,
+    request_id: []const u8,
+    include_payload: bool,
+) ![]u8 {
+    if (request_id.len == 0) return error.InvalidArgs;
+
+    const resolved = try resolvePaths(a, cfg);
+    defer resolved.deinit(a);
+    try ensureDirs(io, resolved);
+
+    var state: QueueState = .not_found;
+    var selected_name: ?[]u8 = null;
+    var selected_dir: ?[]const u8 = null;
+    defer if (selected_name) |n| a.free(n);
+
+    selected_name = try newestMatchingFileNameAlloc(a, io, resolved.outgoing, request_id);
+    if (selected_name != null) {
+        state = .completed;
+        selected_dir = resolved.outgoing;
+    } else {
+        selected_name = try newestMatchingFileNameAlloc(a, io, resolved.processing, request_id);
+        if (selected_name != null) {
+            state = .processing;
+            selected_dir = resolved.processing;
+        } else {
+            selected_name = try newestMatchingFileNameAlloc(a, io, resolved.incoming, request_id);
+            if (selected_name != null) {
+                state = .queued;
+                selected_dir = resolved.incoming;
+            }
+        }
+    }
+
+    const payload = blk: {
+        if (!include_payload) break :blk null;
+        if (state != .completed) break :blk null;
+        if (selected_name == null or selected_dir == null) break :blk null;
+        const out_path = try std.fs.path.join(a, &.{ selected_dir.?, selected_name.? });
+        defer a.free(out_path);
+        break :blk try std.Io.Dir.cwd().readFileAlloc(io, out_path, a, std.Io.Limit.limited(1024 * 1024));
+    };
+    defer if (payload) |p| a.free(p);
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+
+    try stream.beginObject();
+    try stream.objectField("request_id");
+    try stream.write(request_id);
+    try stream.objectField("state");
+    try stream.write(@tagName(state));
+    try stream.objectField("found");
+    try stream.write(state != .not_found);
+    if (selected_name) |name| {
+        try stream.objectField("file");
+        try stream.write(name);
+    }
+    if (payload) |p| {
+        try stream.objectField("result_json");
+        try stream.write(std.mem.trimEnd(u8, p, "\r\n"));
+    }
+    try stream.endObject();
+    return try aw.toOwnedSlice();
 }
 
 pub fn runWorker(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, opts: WorkerOptions) !void {
@@ -132,6 +205,25 @@ fn resolvePaths(a: std.mem.Allocator, cfg: config.ValidatedConfig) !QueuePaths {
         .processing = processing,
         .outgoing = outgoing,
     };
+}
+
+fn requestIdExists(io: std.Io, p: QueuePaths, request_id: []const u8) !bool {
+    if (try dirContainsRequest(io, p.incoming, request_id)) return true;
+    if (try dirContainsRequest(io, p.processing, request_id)) return true;
+    if (try dirContainsRequest(io, p.outgoing, request_id)) return true;
+    return false;
+}
+
+fn dirContainsRequest(io: std.Io, dir_path: []const u8, request_id: []const u8) !bool {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return false;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        if (matchesRequestFileName(ent.name, request_id)) return true;
+    }
+    return false;
 }
 
 fn ensureDirs(io: std.Io, p: QueuePaths) !void {
@@ -280,6 +372,42 @@ fn oldestIncomingNameAlloc(a: std.mem.Allocator, io: std.Io, incoming_dir: []con
     }
 
     return best;
+}
+
+fn newestMatchingFileNameAlloc(a: std.mem.Allocator, io: std.Io, dir_path: []const u8, request_id: []const u8) !?[]u8 {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return null;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    var best: ?[]u8 = null;
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        if (!matchesRequestFileName(ent.name, request_id)) continue;
+
+        if (best == null) {
+            best = try a.dupe(u8, ent.name);
+            continue;
+        }
+        if (std.mem.lessThan(u8, best.?, ent.name)) {
+            a.free(best.?);
+            best = try a.dupe(u8, ent.name);
+        }
+    }
+    return best;
+}
+
+fn matchesRequestFileName(name: []const u8, request_id: []const u8) bool {
+    if (request_id.len == 0) return false;
+    if (!std.mem.endsWith(u8, name, ".json")) return false;
+    const ext_start = name.len - ".json".len;
+    const base = name[0..ext_start];
+
+    const idx = std.mem.indexOf(u8, base, request_id) orelse return false;
+    if (idx == 0 or base[idx - 1] != '_') return false;
+
+    const after = idx + request_id.len;
+    if (after == base.len) return true;
+    return base[after] == '_';
 }
 
 fn decodeJobFromFile(a: std.mem.Allocator, io: std.Io, path: []const u8, default_max_retries: u32) !Job {

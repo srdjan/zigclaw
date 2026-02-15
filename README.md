@@ -92,6 +92,12 @@ Run worker continuously:
 zig-out/bin/zigclaw queue worker
 ```
 
+Inspect a request:
+```sh
+zig-out/bin/zigclaw queue status --request-id req_123
+zig-out/bin/zigclaw queue status --request-id req_123 --include-payload
+```
+
 Config:
 ```toml
 [queue]
@@ -99,6 +105,9 @@ dir = "./.zigclaw/queue"
 poll_ms = 1000
 max_retries = 2
 ```
+
+Notes:
+- `queue enqueue-agent` is idempotent by `request_id`; duplicate IDs are rejected with `DuplicateRequestId`.
 
 ## Layout
 - `src/` native zigclaw core

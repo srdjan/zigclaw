@@ -153,6 +153,7 @@ zig-out/bin/zigclaw policy explain --command "wasmtime run --mapdir /workspace::
 ```
 
 Decision logs are written as JSONL to `./.zigclaw/decisions.jsonl`.
+Policy decision events include tool, provider, and memory decision categories.
 
 Decision log sink and rotation are configurable:
 ```toml

@@ -6,6 +6,7 @@ const provider_factory = @import("../providers/factory.zig");
 const bundle_mod = @import("bundle.zig");
 const obs = @import("../obs/logger.zig");
 const trace = @import("../obs/trace.zig");
+const decision_log = @import("../decision_log.zig");
 const tools_runner = @import("../tools/runner.zig");
 const manifest_mod = @import("../tools/manifest.zig");
 
@@ -123,12 +124,92 @@ pub fn runLoop(
     const run_cfg = try cfgForAgent(ta, cfg, active_agent);
 
     var logger = obs.Logger.fromConfig(run_cfg, io);
-
-    var provider = try provider_factory.build(a, run_cfg);
-    defer provider.deinit(a);
+    const decisions = decision_log.Logger.fromConfig(run_cfg, io);
 
     var b = try bundle_mod.build(ta, io, run_cfg, message);
     defer b.deinit(ta);
+
+    decisions.log(ta, .{
+        .ts_unix_ms = decision_log.nowUnixMs(io),
+        .request_id = request_id,
+        .prompt_hash = b.prompt_hash_hex,
+        .decision = "memory.backend",
+        .subject = @tagName(run_cfg.raw.memory.backend),
+        .allowed = true,
+        .reason = if (run_cfg.raw.memory.backend == .sqlite)
+            "allowed with scaffold fallback to markdown"
+        else
+            "allowed by memory backend config",
+        .policy_hash = run_cfg.policy.policyHash(),
+    });
+    decisions.log(ta, .{
+        .ts_unix_ms = decision_log.nowUnixMs(io),
+        .request_id = request_id,
+        .prompt_hash = b.prompt_hash_hex,
+        .decision = "memory.recall",
+        .subject = run_cfg.raw.memory.root,
+        .allowed = true,
+        .reason = "memory recall executed",
+        .policy_hash = run_cfg.policy.policyHash(),
+    });
+
+    const provider_kind = @tagName(run_cfg.raw.provider_primary.kind);
+    const provider_requires_network = run_cfg.raw.provider_primary.kind == .openai_compat;
+    const provider_network_allowed = !provider_requires_network or run_cfg.policy.active.allow_network;
+    decisions.log(ta, .{
+        .ts_unix_ms = decision_log.nowUnixMs(io),
+        .request_id = request_id,
+        .prompt_hash = b.prompt_hash_hex,
+        .decision = "provider.network",
+        .subject = provider_kind,
+        .allowed = provider_network_allowed,
+        .reason = if (provider_requires_network)
+            (if (provider_network_allowed) "allowed: preset permits provider network access" else "denied: preset disallows provider network access")
+        else
+            "allowed: provider does not require network",
+        .policy_hash = run_cfg.policy.policyHash(),
+    });
+    if (!provider_network_allowed) return error.ProviderNetworkNotAllowed;
+
+    decisions.log(ta, .{
+        .ts_unix_ms = decision_log.nowUnixMs(io),
+        .request_id = request_id,
+        .prompt_hash = b.prompt_hash_hex,
+        .decision = "provider.select",
+        .subject = run_cfg.raw.provider_primary.model,
+        .allowed = true,
+        .reason = "provider/model selected for run",
+        .policy_hash = run_cfg.policy.policyHash(),
+    });
+
+    if (run_cfg.raw.provider_fixtures.mode != .off) {
+        decisions.log(ta, .{
+            .ts_unix_ms = decision_log.nowUnixMs(io),
+            .request_id = request_id,
+            .prompt_hash = b.prompt_hash_hex,
+            .decision = "provider.fixtures",
+            .subject = @tagName(run_cfg.raw.provider_fixtures.mode),
+            .allowed = true,
+            .reason = "fixtures wrapper enabled",
+            .policy_hash = run_cfg.policy.policyHash(),
+        });
+    }
+
+    if (run_cfg.raw.provider_reliable.retries > 0) {
+        decisions.log(ta, .{
+            .ts_unix_ms = decision_log.nowUnixMs(io),
+            .request_id = request_id,
+            .prompt_hash = b.prompt_hash_hex,
+            .decision = "provider.reliable",
+            .subject = run_cfg.raw.provider_primary.model,
+            .allowed = true,
+            .reason = "reliable retry wrapper enabled",
+            .policy_hash = run_cfg.policy.policyHash(),
+        });
+    }
+
+    var provider = try provider_factory.build(a, run_cfg);
+    defer provider.deinit(a);
 
     logger.logJson(ta, .agent_run, request_id, .{
         .prompt_hash = b.prompt_hash_hex,

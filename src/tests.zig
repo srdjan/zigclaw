@@ -926,6 +926,7 @@ const protocol = @import("tools/protocol.zig");
 const diff = @import("util/diff.zig");
 const app_mod = @import("app.zig");
 const tools_runner = @import("tools/runner.zig");
+const agent_loop = @import("agent/loop.zig");
 
 const gw_http = @import("gateway/http.zig");
 const gw_routes = @import("gateway/routes.zig");
@@ -1357,6 +1358,77 @@ test "decision log includes request_id/prompt_hash and rotates" {
     const decision = obj.get("decision") orelse return error.BadGolden;
     try std.testing.expect(decision == .string);
     try std.testing.expectEqualStrings("tool.allow", decision.string);
+}
+
+test "decision log includes provider and memory categories" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const log_dir = "tests/.tmp_decision_provider_memory";
+    std.Io.Dir.cwd().deleteTree(io, log_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, log_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.logging.enabled = true;
+    vcq.raw.logging.dir = log_dir;
+    vcq.raw.logging.file = "decisions.jsonl";
+    vcq.raw.logging.max_file_bytes = 1024 * 1024;
+    vcq.raw.logging.max_files = 2;
+
+    var res = try agent_loop.runLoop(a, io, vcq, "hello decisions", "req_pm_1", .{});
+    defer res.deinit(a);
+
+    const log_path = try std.fs.path.join(a, &.{ log_dir, "decisions.jsonl" });
+    defer a.free(log_path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, log_path, a, std.Io.Limit.limited(1024 * 1024));
+    defer a.free(bytes);
+
+    var has_mem_backend = false;
+    var has_mem_recall = false;
+    var has_provider_network = false;
+    var has_provider_select = false;
+    var saw_prompt_hash = false;
+
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, line, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const obj2 = parsed.value.object;
+
+        const rid = obj2.get("request_id") orelse return error.BadGolden;
+        if (rid != .string) return error.BadGolden;
+        try std.testing.expectEqualStrings("req_pm_1", rid.string);
+
+        const ph = obj2.get("prompt_hash") orelse return error.BadGolden;
+        if (ph == .string and ph.string.len == 64) saw_prompt_hash = true;
+
+        const d = obj2.get("decision") orelse return error.BadGolden;
+        if (d != .string) return error.BadGolden;
+        if (std.mem.eql(u8, d.string, "memory.backend")) has_mem_backend = true;
+        if (std.mem.eql(u8, d.string, "memory.recall")) has_mem_recall = true;
+        if (std.mem.eql(u8, d.string, "provider.network")) has_provider_network = true;
+        if (std.mem.eql(u8, d.string, "provider.select")) has_provider_select = true;
+    }
+
+    try std.testing.expect(has_mem_backend);
+    try std.testing.expect(has_mem_recall);
+    try std.testing.expect(has_provider_network);
+    try std.testing.expect(has_provider_select);
+    try std.testing.expect(saw_prompt_hash);
 }
 
 // ---- recall.zig tests ----

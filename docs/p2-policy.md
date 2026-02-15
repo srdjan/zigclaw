@@ -12,6 +12,9 @@ Implemented:
 - `zigclaw policy explain --command "<cmd>"` explains command allowlist safety:
   `{ "command":"...", "allowed":true/false, "reason":"...", "policy_hash":"..." }`
 - Policy decision events now include both `request_id` and `prompt_hash` (nullable when unavailable).
+- Decision categories now include provider and memory pathways:
+  `provider.network`, `provider.select`, `provider.fixtures`, `provider.reliable`,
+  `memory.backend`, and `memory.recall`.
 
 Next:
-- Expand decision categories beyond tool policy gates (for example, provider and memory policy decisions).
+- Add policy decision coverage for gateway auth/rate-limit boundaries.

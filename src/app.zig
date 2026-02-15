@@ -31,7 +31,7 @@ pub const App = struct {
         args_json: []const u8,
     ) !tools_runner.ToolRunResult {
         const rid = trace.newRequestId(self.io);
-        return try tools_runner.run(self.allocator, self.io, cfg, rid.slice(), tool, args_json);
+        return try tools_runner.run(self.allocator, self.io, cfg, rid.slice(), tool, args_json, .{});
     }
 
     pub fn runToolWithRequestId(
@@ -42,6 +42,6 @@ pub const App = struct {
         tool: []const u8,
         args_json: []const u8,
     ) !tools_runner.ToolRunResult {
-        return try tools_runner.run(a, self.io, cfg, request_id, tool, args_json);
+        return try tools_runner.run(a, self.io, cfg, request_id, tool, args_json, .{});
     }
 };

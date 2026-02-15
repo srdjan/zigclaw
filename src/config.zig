@@ -9,7 +9,7 @@ pub const ProviderConfig = struct {
     temperature: f64 = 0.2,
 
     base_url: []const u8 = "https://api.openai.com/v1",
-    api_key: []const u8 = "",          // optional (can be empty); do not print in normalized config
+    api_key: []const u8 = "", // optional (can be empty); do not print in normalized config
     api_key_env: []const u8 = "OPENAI_API_KEY",
 };
 
@@ -37,10 +37,17 @@ pub const SecurityConfig = struct {
     max_request_bytes: usize = 262144,
 };
 
-
 pub const ObservabilityConfig = struct {
     enabled: bool = true,
     dir: []const u8 = "./.zigclaw/logs",
+    max_file_bytes: u64 = 1024 * 1024,
+    max_files: u32 = 5,
+};
+
+pub const LoggingConfig = struct {
+    enabled: bool = true,
+    dir: []const u8 = "./.zigclaw",
+    file: []const u8 = "decisions.jsonl",
     max_file_bytes: u64 = 1024 * 1024,
     max_files: u32 = 5,
 };
@@ -86,6 +93,7 @@ pub const Config = struct {
     config_version: u32 = 1,
 
     observability: ObservabilityConfig = .{},
+    logging: LoggingConfig = .{},
 
     provider_primary: ProviderConfig = .{},
     provider_fixtures: ProviderFixturesConfig = .{},
@@ -127,6 +135,7 @@ pub const ValidatedConfig = struct {
             \\  security.workspace_root={s} max_request_bytes={d}
             \\  tools.wasmtime_path={s} plugin_dir={s}
             \\  queue.dir={s} poll_ms={d} max_retries={d} retry_backoff_ms={d} retry_jitter_pct={d}
+            \\  logging.enabled={s} dir={s} file={s} max_file_bytes={d} max_files={d}
             \\  capabilities.active_preset={s}
             \\  orchestration.leader_agent={s} agents={d}
             \\  policy.tools_allowed={d} presets={d}
@@ -153,6 +162,11 @@ pub const ValidatedConfig = struct {
             sys.queue.max_retries,
             sys.queue.retry_backoff_ms,
             sys.queue.retry_jitter_pct,
+            if (sys.logging.enabled) "true" else "false",
+            sys.logging.dir,
+            sys.logging.file,
+            sys.logging.max_file_bytes,
+            sys.logging.max_files,
             sys.capabilities.active_preset,
             sys.orchestration.leader_agent,
             sys.orchestration.agents.len,
@@ -229,17 +243,28 @@ pub const ValidatedConfig = struct {
             }
         }
 
+        // [observability]
+        try w.writeAll("[observability]\n");
+        try w.print("enabled = {s}\n", .{if (self.raw.observability.enabled) "true" else "false"});
+        try w.writeAll("dir = ");
+        try writeTomlString(w, self.raw.observability.dir);
+        try w.writeAll("\n");
+        try w.print("max_file_bytes = {d}\n", .{self.raw.observability.max_file_bytes});
+        try w.print("max_files = {d}\n\n", .{self.raw.observability.max_files});
 
-// [observability]
-try w.writeAll("[observability]\n");
-try w.print("enabled = {s}\n", .{if (self.raw.observability.enabled) "true" else "false"});
-try w.writeAll("dir = ");
-try writeTomlString(w, self.raw.observability.dir);
-try w.writeAll("\n");
-try w.print("max_file_bytes = {d}\n", .{self.raw.observability.max_file_bytes});
-try w.print("max_files = {d}\n\n", .{self.raw.observability.max_files});
+        // [logging]
+        try w.writeAll("[logging]\n");
+        try w.print("enabled = {s}\n", .{if (self.raw.logging.enabled) "true" else "false"});
+        try w.writeAll("dir = ");
+        try writeTomlString(w, self.raw.logging.dir);
+        try w.writeAll("\n");
+        try w.writeAll("file = ");
+        try writeTomlString(w, self.raw.logging.file);
+        try w.writeAll("\n");
+        try w.print("max_file_bytes = {d}\n", .{self.raw.logging.max_file_bytes});
+        try w.print("max_files = {d}\n\n", .{self.raw.logging.max_files});
 
-// [security]
+        // [security]
         try w.writeAll("[security]\n");
         try w.writeAll("workspace_root = ");
         try writeTomlString(w, self.raw.security.workspace_root);
@@ -540,7 +565,10 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
 
     var warns = std.array_list.Managed(Warning).init(a);
     errdefer {
-        for (warns.items) |w| { a.free(w.key_path); a.free(w.message); }
+        for (warns.items) |w| {
+            a.free(w.key_path);
+            a.free(w.message);
+        }
         warns.deinit();
     }
 
@@ -570,23 +598,42 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
             continue;
         }
 
-
-if (std.mem.eql(u8, k, "observability.enabled")) {
-    cfg.observability.enabled = try coerceBool(v);
-    continue;
-}
-if (std.mem.eql(u8, k, "observability.dir")) {
-    cfg.observability.dir = try coerceStringDup(a, v);
-    continue;
-}
-if (std.mem.eql(u8, k, "observability.max_file_bytes")) {
-    cfg.observability.max_file_bytes = @as(u64, @intCast(try coerceUsize(v)));
-    continue;
-}
-if (std.mem.eql(u8, k, "observability.max_files")) {
-    cfg.observability.max_files = try coerceU32(v);
-    continue;
-}
+        if (std.mem.eql(u8, k, "observability.enabled")) {
+            cfg.observability.enabled = try coerceBool(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "observability.dir")) {
+            cfg.observability.dir = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "observability.max_file_bytes")) {
+            cfg.observability.max_file_bytes = @as(u64, @intCast(try coerceUsize(v)));
+            continue;
+        }
+        if (std.mem.eql(u8, k, "observability.max_files")) {
+            cfg.observability.max_files = try coerceU32(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "logging.enabled")) {
+            cfg.logging.enabled = try coerceBool(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "logging.dir")) {
+            cfg.logging.dir = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "logging.file")) {
+            cfg.logging.file = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "logging.max_file_bytes")) {
+            cfg.logging.max_file_bytes = @as(u64, @intCast(try coerceUsize(v)));
+            continue;
+        }
+        if (std.mem.eql(u8, k, "logging.max_files")) {
+            cfg.logging.max_files = try coerceU32(v);
+            continue;
+        }
 
         if (std.mem.eql(u8, k, "security.workspace_root")) {
             cfg.security.workspace_root = try coerceStringDup(a, v);
@@ -629,9 +676,7 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
 
         if (std.mem.eql(u8, k, "providers.primary.kind")) {
             const s = try coerceString(v);
-            if (std.mem.eql(u8, s, "stub")) cfg.provider_primary.kind = .stub
-            else if (std.mem.eql(u8, s, "openai_compat")) cfg.provider_primary.kind = .openai_compat
-            else {
+            if (std.mem.eql(u8, s, "stub")) cfg.provider_primary.kind = .stub else if (std.mem.eql(u8, s, "openai_compat")) cfg.provider_primary.kind = .openai_compat else {
                 try warns.append(.{ .key_path = try a.dupe(u8, k), .message = try std.fmt.allocPrint(a, "unknown providers.primary.kind '{s}', using 'stub'", .{s}) });
                 cfg.provider_primary.kind = .stub;
             }
@@ -661,10 +706,7 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
 
         if (std.mem.eql(u8, k, "providers.fixtures.mode")) {
             const s = try coerceString(v);
-            if (std.mem.eql(u8, s, "off")) cfg.provider_fixtures.mode = .off
-            else if (std.mem.eql(u8, s, "record")) cfg.provider_fixtures.mode = .record
-            else if (std.mem.eql(u8, s, "replay")) cfg.provider_fixtures.mode = .replay
-            else {
+            if (std.mem.eql(u8, s, "off")) cfg.provider_fixtures.mode = .off else if (std.mem.eql(u8, s, "record")) cfg.provider_fixtures.mode = .record else if (std.mem.eql(u8, s, "replay")) cfg.provider_fixtures.mode = .replay else {
                 try warns.append(.{ .key_path = try a.dupe(u8, k), .message = try std.fmt.allocPrint(a, "unknown providers.fixtures.mode '{s}', using 'off'", .{s}) });
                 cfg.provider_fixtures.mode = .off;
             }
@@ -686,9 +728,7 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
 
         if (std.mem.eql(u8, k, "memory.backend")) {
             const s = try coerceString(v);
-            if (std.mem.eql(u8, s, "markdown")) cfg.memory.backend = .markdown
-            else if (std.mem.eql(u8, s, "sqlite")) cfg.memory.backend = .sqlite
-            else {
+            if (std.mem.eql(u8, s, "markdown")) cfg.memory.backend = .markdown else if (std.mem.eql(u8, s, "sqlite")) cfg.memory.backend = .sqlite else {
                 try warns.append(.{ .key_path = try a.dupe(u8, k), .message = try std.fmt.allocPrint(a, "unknown memory.backend '{s}', using 'markdown'", .{s}) });
                 cfg.memory.backend = .markdown;
             }
@@ -752,7 +792,9 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
         while (itn.next()) |kp| try names.append(kp.*);
     }
     std.sort.block([]const u8, names.items, {}, struct {
-        fn lt(_: void, a_: []const u8, b_: []const u8) bool { return std.mem.lessThan(u8, a_, b_); }
+        fn lt(_: void, a_: []const u8, b_: []const u8) bool {
+            return std.mem.lessThan(u8, a_, b_);
+        }
     }.lt);
 
     var presets = std.array_list.Managed(PresetConfig).init(a);
@@ -804,7 +846,9 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
         while (ita.next()) |kp| try agent_ids.append(kp.*);
     }
     std.sort.block([]const u8, agent_ids.items, {}, struct {
-        fn lt(_: void, a_: []const u8, b_: []const u8) bool { return std.mem.lessThan(u8, a_, b_); }
+        fn lt(_: void, a_: []const u8, b_: []const u8) bool {
+            return std.mem.lessThan(u8, a_, b_);
+        }
     }.lt);
 
     var agents = std.array_list.Managed(AgentProfileConfig).init(a);
@@ -968,6 +1012,8 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
     inline for (.{
         .{ &cfg.capabilities.active_preset, &d.capabilities.active_preset },
         .{ &cfg.observability.dir, &d.observability.dir },
+        .{ &cfg.logging.dir, &d.logging.dir },
+        .{ &cfg.logging.file, &d.logging.file },
         .{ &cfg.security.workspace_root, &d.security.workspace_root },
         .{ &cfg.tools.wasmtime_path, &d.tools.wasmtime_path },
         .{ &cfg.tools.plugin_dir, &d.tools.plugin_dir },

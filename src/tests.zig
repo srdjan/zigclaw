@@ -925,6 +925,7 @@ const obs_trace = @import("obs/trace.zig");
 const protocol = @import("tools/protocol.zig");
 const diff = @import("util/diff.zig");
 const app_mod = @import("app.zig");
+const tools_runner = @import("tools/runner.zig");
 
 const gw_http = @import("gateway/http.zig");
 const gw_routes = @import("gateway/routes.zig");
@@ -1285,6 +1286,77 @@ test "ToolRunResult toJsonAlloc includes request_id" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"request_id\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") != null);
+}
+
+test "decision log includes request_id/prompt_hash and rotates" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const log_dir = "tests/.tmp_decision_logs";
+    std.Io.Dir.cwd().deleteTree(io, log_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, log_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+    var vcq = vc;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.logging.enabled = true;
+    vcq.raw.logging.dir = log_dir;
+    vcq.raw.logging.file = "decisions.jsonl";
+    vcq.raw.logging.max_file_bytes = 1;
+    vcq.raw.logging.max_files = 2;
+
+    try std.testing.expectError(error.ToolNotAllowed, tools_runner.run(
+        a,
+        io,
+        vcq,
+        "req_decision_1",
+        "shell_exec",
+        "{}",
+        .{ .prompt_hash = "prompt_hash_abc123" },
+    ));
+
+    try std.testing.expectError(error.ToolNotAllowed, tools_runner.run(
+        a,
+        io,
+        vcq,
+        "req_decision_2",
+        "shell_exec",
+        "{}",
+        .{},
+    ));
+
+    const cur_path = try std.fs.path.join(a, &.{ log_dir, "decisions.jsonl" });
+    defer a.free(cur_path);
+    const old_path = try std.fs.path.join(a, &.{ log_dir, "decisions.jsonl.1" });
+    defer a.free(old_path);
+
+    _ = try std.Io.Dir.cwd().statFile(io, cur_path, .{});
+    _ = try std.Io.Dir.cwd().statFile(io, old_path, .{});
+
+    const old_bytes = try std.Io.Dir.cwd().readFileAlloc(io, old_path, a, std.Io.Limit.limited(1024 * 1024));
+    defer a.free(old_bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, old_bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const obj = parsed.value.object;
+
+    const rid = obj.get("request_id") orelse return error.BadGolden;
+    try std.testing.expect(rid == .string);
+    try std.testing.expectEqualStrings("req_decision_1", rid.string);
+
+    const ph = obj.get("prompt_hash") orelse return error.BadGolden;
+    try std.testing.expect(ph == .string);
+    try std.testing.expectEqualStrings("prompt_hash_abc123", ph.string);
+
+    const decision = obj.get("decision") orelse return error.BadGolden;
+    try std.testing.expect(decision == .string);
+    try std.testing.expectEqualStrings("tool.allow", decision.string);
 }
 
 // ---- recall.zig tests ----

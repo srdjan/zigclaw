@@ -229,7 +229,7 @@ pub fn runLoop(
 
         if (opts.verbose) {
             verboseLog(io, "[verbose] turn={d} finish_reason={s} content_bytes={d} tool_calls={d} tokens={d}/{d}/{d}\n", .{
-                turn, @tagName(resp.finish_reason), resp.content.len, resp.tool_calls.len,
+                turn,                     @tagName(resp.finish_reason), resp.content.len,        resp.tool_calls.len,
                 resp.usage.prompt_tokens, resp.usage.completion_tokens, resp.usage.total_tokens,
             });
             if (resp.content.len > 0) {
@@ -310,7 +310,9 @@ pub fn runLoop(
                 continue;
             }
 
-            const tool_result = tools_runner.run(ta, io, run_cfg, request_id, tc.name, tc.arguments) catch |e| {
+            const tool_result = tools_runner.run(ta, io, run_cfg, request_id, tc.name, tc.arguments, .{
+                .prompt_hash = b.prompt_hash_hex,
+            }) catch |e| {
                 // Tool execution failed - send error back to LLM
                 const err_msg = try std.fmt.allocPrint(ta, "Tool execution error: {s}", .{@errorName(e)});
 

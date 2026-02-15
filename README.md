@@ -154,6 +154,16 @@ zig-out/bin/zigclaw policy explain --command "wasmtime run --mapdir /workspace::
 
 Decision logs are written as JSONL to `./.zigclaw/decisions.jsonl`.
 
+Decision log sink and rotation are configurable:
+```toml
+[logging]
+enabled = true
+dir = "./.zigclaw"
+file = "decisions.jsonl"
+max_file_bytes = 1048576
+max_files = 5
+```
+
 
 ## Prompt (deterministic)
 

@@ -7,6 +7,7 @@ const schema = @import("schema.zig");
 const obs = @import("../obs/logger.zig");
 const trace = @import("../obs/trace.zig");
 const hash = @import("../obs/hash.zig");
+const decision_log = @import("../decision_log.zig");
 
 pub const ToolRunResult = struct {
     request_id: []u8,
@@ -29,8 +30,10 @@ pub const ToolRunResult = struct {
         var stream: std.json.Stringify = .{ .writer = &aw.writer };
 
         try stream.beginObject();
-        try stream.objectField("request_id"); try stream.write(self.request_id);
-        try stream.objectField("ok"); try stream.write(self.ok);
+        try stream.objectField("request_id");
+        try stream.write(self.request_id);
+        try stream.objectField("ok");
+        try stream.write(self.ok);
 
         // data_json is already JSON string; embed as parsed if possible, else as string fallback
         try stream.objectField("data");
@@ -42,12 +45,18 @@ pub const ToolRunResult = struct {
             try stream.write(self.data_json);
         }
 
-        try stream.objectField("stdout"); try stream.write(self.stdout);
-        try stream.objectField("stderr"); try stream.write(self.stderr);
+        try stream.objectField("stdout");
+        try stream.write(self.stdout);
+        try stream.objectField("stderr");
+        try stream.write(self.stderr);
         try stream.endObject();
 
         return try aw.toOwnedSlice();
     }
+};
+
+pub const RunMeta = struct {
+    prompt_hash: ?[]const u8 = null,
 };
 
 pub fn run(
@@ -57,8 +66,10 @@ pub fn run(
     request_id: []const u8,
     tool: []const u8,
     args_json: []const u8,
+    meta: RunMeta,
 ) !ToolRunResult {
     var logger = obs.Logger.fromConfig(cfg, io);
+    const decisions = decision_log.Logger.fromConfig(cfg, io);
 
     const args_sha = hash.sha256HexAlloc(a, args_json) catch "";
     defer if (args_sha.len > 0) a.free(args_sha);
@@ -72,6 +83,17 @@ pub fn run(
         .policy_hash = cfg.policy.policyHash(),
     });
 
+    decisions.log(a, .{
+        .ts_unix_ms = decision_log.nowUnixMs(io),
+        .request_id = request_id,
+        .prompt_hash = meta.prompt_hash,
+        .decision = "tool.allow",
+        .subject = tool,
+        .allowed = allowed,
+        .reason = if (allowed) "allowed by capability preset" else "denied: tool not in capability preset",
+        .policy_hash = cfg.policy.policyHash(),
+    });
+
     if (!allowed) return error.ToolNotAllowed;
 
     // Locate manifest and load it
@@ -82,7 +104,20 @@ pub fn run(
     const m = owned.manifest;
 
     // Fail-closed: tool requiring network must be explicitly allowed (capability preset allow_network=true)
-    if (m.requires_network and !cfg.policy.active.allow_network) return error.ToolNetworkNotAllowed;
+    if (m.requires_network) {
+        const network_allowed = cfg.policy.active.allow_network;
+        decisions.log(a, .{
+            .ts_unix_ms = decision_log.nowUnixMs(io),
+            .request_id = request_id,
+            .prompt_hash = meta.prompt_hash,
+            .decision = "tool.network",
+            .subject = tool,
+            .allowed = network_allowed,
+            .reason = if (network_allowed) "allowed: preset permits network" else "denied: tool requires network but preset disallows it",
+            .policy_hash = cfg.policy.policyHash(),
+        });
+        if (!network_allowed) return error.ToolNetworkNotAllowed;
+    }
 
     // Validate args against schema
     schema.validateArgs(m.args, args_json) catch return error.InvalidToolArgs;

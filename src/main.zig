@@ -423,6 +423,13 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\max_file_bytes = 1048576
         \\max_files = 5
         \\
+        \\[logging]
+        \\enabled = true
+        \\dir = "./.zigclaw"
+        \\file = "decisions.jsonl"
+        \\max_file_bytes = 1048576
+        \\max_files = 5
+        \\
     ;
 
     dir.writeFile(io, .{ .sub_path = "zigclaw.toml", .data = default_config }) catch |e| {

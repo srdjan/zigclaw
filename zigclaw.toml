@@ -53,3 +53,10 @@ enabled = true
 dir = "./.zigclaw/logs"
 max_file_bytes = 1048576
 max_files = 5
+
+[logging]
+enabled = true
+dir = "./.zigclaw"
+file = "decisions.jsonl"
+max_file_bytes = 1048576
+max_files = 5

@@ -19,6 +19,7 @@ Implemented:
   `gateway.auth` and `gateway.request_bytes`.
 - Per-client gateway throttling is enforced when enabled and logged as:
   `gateway.throttle` (allow/deny).
+  - Supports `memory` store and shared local `file` store modes.
 
 Next:
-- Add distributed/shared limiter storage for multi-process gateway deployments.
+- Add external distributed limiter backend for multi-host gateway deployments.

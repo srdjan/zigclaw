@@ -389,8 +389,10 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\
         \\[gateway]
         \\rate_limit_enabled = false
+        \\rate_limit_store = "memory"
         \\rate_limit_window_ms = 1000
         \\rate_limit_max_requests = 60
+        \\rate_limit_dir = "./.zigclaw/gateway_rate_limit"
         \\
         \\[providers.primary]
         \\kind = "openai_compat"

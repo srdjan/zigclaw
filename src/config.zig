@@ -39,9 +39,13 @@ pub const SecurityConfig = struct {
 
 pub const GatewayConfig = struct {
     rate_limit_enabled: bool = false,
+    rate_limit_store: RateLimitStore = .memory,
     rate_limit_window_ms: u32 = 1000,
     rate_limit_max_requests: u32 = 60,
+    rate_limit_dir: []const u8 = "./.zigclaw/gateway_rate_limit",
 };
+
+pub const RateLimitStore = enum { memory, file };
 
 pub const ObservabilityConfig = struct {
     enabled: bool = true,
@@ -161,6 +165,10 @@ pub const ValidatedConfig = struct {
             if (sys.gateway.rate_limit_enabled) "true" else "false",
             sys.gateway.rate_limit_window_ms,
             sys.gateway.rate_limit_max_requests,
+        });
+        try w.print("  gateway.rate_limit_store={s} rate_limit_dir={s}\n", .{
+            @tagName(sys.gateway.rate_limit_store),
+            sys.gateway.rate_limit_dir,
         });
         try w.print("  tools.wasmtime_path={s} plugin_dir={s}\n", .{
             sys.tools.wasmtime_path,
@@ -283,8 +291,14 @@ pub const ValidatedConfig = struct {
         // [gateway]
         try w.writeAll("[gateway]\n");
         try w.print("rate_limit_enabled = {s}\n", .{if (self.raw.gateway.rate_limit_enabled) "true" else "false"});
+        try w.writeAll("rate_limit_store = ");
+        try writeTomlString(w, @tagName(self.raw.gateway.rate_limit_store));
+        try w.writeAll("\n");
         try w.print("rate_limit_window_ms = {d}\n", .{self.raw.gateway.rate_limit_window_ms});
-        try w.print("rate_limit_max_requests = {d}\n\n", .{self.raw.gateway.rate_limit_max_requests});
+        try w.print("rate_limit_max_requests = {d}\n", .{self.raw.gateway.rate_limit_max_requests});
+        try w.writeAll("rate_limit_dir = ");
+        try writeTomlString(w, self.raw.gateway.rate_limit_dir);
+        try w.writeAll("\n\n");
 
         // [security]
         try w.writeAll("[security]\n");
@@ -666,6 +680,18 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
         }
         if (std.mem.eql(u8, k, "gateway.rate_limit_max_requests")) {
             cfg.gateway.rate_limit_max_requests = try coerceU32(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "gateway.rate_limit_store")) {
+            const s = try coerceString(v);
+            if (std.mem.eql(u8, s, "memory")) cfg.gateway.rate_limit_store = .memory else if (std.mem.eql(u8, s, "file")) cfg.gateway.rate_limit_store = .file else {
+                try warns.append(.{ .key_path = try a.dupe(u8, k), .message = try std.fmt.allocPrint(a, "unknown gateway.rate_limit_store '{s}', using 'memory'", .{s}) });
+                cfg.gateway.rate_limit_store = .memory;
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, k, "gateway.rate_limit_dir")) {
+            cfg.gateway.rate_limit_dir = try coerceStringDup(a, v);
             continue;
         }
 
@@ -1064,6 +1090,7 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
         .{ &cfg.observability.dir, &d.observability.dir },
         .{ &cfg.logging.dir, &d.logging.dir },
         .{ &cfg.logging.file, &d.logging.file },
+        .{ &cfg.gateway.rate_limit_dir, &d.gateway.rate_limit_dir },
         .{ &cfg.security.workspace_root, &d.security.workspace_root },
         .{ &cfg.tools.wasmtime_path, &d.tools.wasmtime_path },
         .{ &cfg.tools.plugin_dir, &d.tools.plugin_dir },

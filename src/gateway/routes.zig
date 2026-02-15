@@ -35,6 +35,8 @@ const RateResult = struct {
     client_key: ClientKey,
     window_count: u32,
     limit: u32,
+    store: config.RateLimitStore,
+    degraded: bool = false,
 };
 
 var rate_buckets: [rate_bucket_count]RateBucket = [_]RateBucket{.{}} ** rate_bucket_count;
@@ -78,12 +80,15 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         return .{ .status = 200, .body = body };
     }
 
-    const rate = checkRateLimit(req, cfg.raw.gateway, io);
+    const rate = checkRateLimit(a, req, cfg, io, request_id);
     if (cfg.raw.gateway.rate_limit_enabled) {
-        const throttle_reason = if (rate.allowed)
-            try std.fmt.allocPrint(a, "allowed: {d}/{d} requests in current window", .{ rate.window_count, rate.limit })
+        const store_name = @tagName(rate.store);
+        const throttle_reason = if (rate.degraded)
+            try std.fmt.allocPrint(a, "allowed (degraded): store={s} unavailable; bypassing limit", .{store_name})
+        else if (rate.allowed)
+            try std.fmt.allocPrint(a, "allowed: store={s} {d}/{d} requests in current window", .{ store_name, rate.window_count, rate.limit })
         else
-            try std.fmt.allocPrint(a, "denied: {d}/{d} requests in current window", .{ rate.window_count, rate.limit });
+            try std.fmt.allocPrint(a, "denied: store={s} {d}/{d} requests in current window", .{ store_name, rate.window_count, rate.limit });
         defer a.free(throttle_reason);
 
         decisions.log(a, .{
@@ -235,7 +240,8 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
     return try jsonError(a, 404, request_id, "not found");
 }
 
-fn checkRateLimit(req: http.RequestOwned, gcfg: config.GatewayConfig, io: std.Io) RateResult {
+fn checkRateLimit(a: std.mem.Allocator, req: http.RequestOwned, cfg: config.ValidatedConfig, io: std.Io, request_id: []const u8) RateResult {
+    const gcfg = cfg.raw.gateway;
     const key = clientKeyFromRequest(req);
     if (!gcfg.rate_limit_enabled) {
         return .{
@@ -243,9 +249,24 @@ fn checkRateLimit(req: http.RequestOwned, gcfg: config.GatewayConfig, io: std.Io
             .client_key = key,
             .window_count = 0,
             .limit = if (gcfg.rate_limit_max_requests == 0) 1 else gcfg.rate_limit_max_requests,
+            .store = gcfg.rate_limit_store,
         };
     }
 
+    return switch (gcfg.rate_limit_store) {
+        .memory => checkRateLimitMemory(key, gcfg, io),
+        .file => checkRateLimitFile(a, key, cfg.raw.security.workspace_root, gcfg, io, request_id) catch .{
+            .allowed = true,
+            .client_key = key,
+            .window_count = 0,
+            .limit = if (gcfg.rate_limit_max_requests == 0) 1 else gcfg.rate_limit_max_requests,
+            .store = .file,
+            .degraded = true,
+        },
+    };
+}
+
+fn checkRateLimitMemory(key: ClientKey, gcfg: config.GatewayConfig, io: std.Io) RateResult {
     const now_ms = decision_log.nowUnixMs(io);
     const window_ms: i64 = @intCast(if (gcfg.rate_limit_window_ms == 0) 1 else gcfg.rate_limit_window_ms);
     const limit: u32 = if (gcfg.rate_limit_max_requests == 0) 1 else gcfg.rate_limit_max_requests;
@@ -270,7 +291,100 @@ fn checkRateLimit(req: http.RequestOwned, gcfg: config.GatewayConfig, io: std.Io
         .client_key = key,
         .window_count = bucket.count,
         .limit = limit,
+        .store = .memory,
     };
+}
+
+fn checkRateLimitFile(
+    a: std.mem.Allocator,
+    key: ClientKey,
+    workspace_root: []const u8,
+    gcfg: config.GatewayConfig,
+    io: std.Io,
+    request_id: []const u8,
+) !RateResult {
+    const now_ms = decision_log.nowUnixMs(io);
+    const window_ms: i64 = @intCast(if (gcfg.rate_limit_window_ms == 0) 1 else gcfg.rate_limit_window_ms);
+    const limit: u32 = if (gcfg.rate_limit_max_requests == 0) 1 else gcfg.rate_limit_max_requests;
+
+    const dir_path = if (std.fs.path.isAbsolute(gcfg.rate_limit_dir))
+        try a.dupe(u8, gcfg.rate_limit_dir)
+    else
+        try std.fs.path.join(a, &.{ workspace_root, gcfg.rate_limit_dir });
+    defer a.free(dir_path);
+    try std.Io.Dir.cwd().createDirPath(io, dir_path);
+
+    const key_hash = hashClientKey(key.slice());
+
+    const name = try std.fmt.allocPrint(a, "{d}_{x}_{s}.evt", .{ now_ms, key_hash, request_id });
+    defer a.free(name);
+    const path = try std.fs.path.join(a, &.{ dir_path, name });
+    defer a.free(path);
+
+    var f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer f.close(io);
+    var buf: [128]u8 = undefined;
+    var w = f.writer(io, &buf);
+    try w.interface.writeAll(key.slice());
+    try w.interface.writeAll("\n");
+    try w.flush();
+
+    const oldest_keep = now_ms - window_ms * 2;
+    const window_start = now_ms - window_ms;
+    var count: u32 = 0;
+
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return error.OpenDirFailed;
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        if (!std.mem.endsWith(u8, ent.name, ".evt")) continue;
+
+        const parsed = parseRateEntryName(ent.name) orelse continue;
+        if (parsed.ts_ms < oldest_keep) {
+            const stale_path = try std.fs.path.join(a, &.{ dir_path, ent.name });
+            defer a.free(stale_path);
+            _ = std.Io.Dir.cwd().deleteFile(io, stale_path) catch {};
+            continue;
+        }
+        if (parsed.ts_ms < window_start) continue;
+        if (parsed.key_hash != key_hash) continue;
+
+        const ep = try std.fs.path.join(a, &.{ dir_path, ent.name });
+        defer a.free(ep);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, ep, a, std.Io.Limit.limited(256)) catch continue;
+        defer a.free(bytes);
+        const stored = std.mem.trim(u8, bytes, " \t\r\n");
+        if (!std.mem.eql(u8, stored, key.slice())) continue;
+
+        count += 1;
+    }
+
+    return .{
+        .allowed = count <= limit,
+        .client_key = key,
+        .window_count = count,
+        .limit = limit,
+        .store = .file,
+    };
+}
+
+const RateEntryName = struct {
+    ts_ms: i64,
+    key_hash: u64,
+};
+
+fn parseRateEntryName(name: []const u8) ?RateEntryName {
+    if (!std.mem.endsWith(u8, name, ".evt")) return null;
+    const base = name[0 .. name.len - ".evt".len];
+    const us1 = std.mem.indexOfScalar(u8, base, '_') orelse return null;
+    const us2_rel = std.mem.indexOfScalar(u8, base[us1 + 1 ..], '_') orelse return null;
+    const us2 = us1 + 1 + us2_rel;
+    if (us1 == 0 or us2 <= us1 + 1) return null;
+
+    const ts_ms = std.fmt.parseInt(i64, base[0..us1], 10) catch return null;
+    const key_hash = std.fmt.parseInt(u64, base[us1 + 1 .. us2], 16) catch return null;
+    return .{ .ts_ms = ts_ms, .key_hash = key_hash };
 }
 
 fn hashClientKey(key: []const u8) u64 {

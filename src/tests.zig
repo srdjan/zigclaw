@@ -1378,8 +1378,10 @@ test "gateway rate limit throttles per client and logs allow/deny decisions" {
     vcq.raw.logging.max_file_bytes = 1024 * 1024;
     vcq.raw.logging.max_files = 2;
     vcq.raw.gateway.rate_limit_enabled = true;
+    vcq.raw.gateway.rate_limit_store = .file;
     vcq.raw.gateway.rate_limit_window_ms = 60_000;
     vcq.raw.gateway.rate_limit_max_requests = 2;
+    vcq.raw.gateway.rate_limit_dir = "tests/.tmp_gateway_throttle/store";
 
     gw_routes.resetRateLimiterForTests();
 
@@ -1412,6 +1414,7 @@ test "gateway rate limit throttles per client and logs allow/deny decisions" {
 
     var saw_allow = false;
     var saw_deny = false;
+    var saw_store_file = false;
 
     var it = std.mem.splitScalar(u8, bytes, '\n');
     while (it.next()) |line| {
@@ -1425,11 +1428,15 @@ test "gateway rate limit throttles per client and logs allow/deny decisions" {
         if (!std.mem.eql(u8, d.string, "gateway.throttle")) continue;
         const allowed = obj.get("allowed") orelse return error.BadGolden;
         if (allowed != .bool) return error.BadGolden;
+        const reason = obj.get("reason") orelse return error.BadGolden;
+        if (reason != .string) return error.BadGolden;
+        if (std.mem.indexOf(u8, reason.string, "store=file") != null) saw_store_file = true;
         if (allowed.bool) saw_allow = true else saw_deny = true;
     }
 
     try std.testing.expect(saw_allow);
     try std.testing.expect(saw_deny);
+    try std.testing.expect(saw_store_file);
 }
 
 test "ToolRunResult toJsonAlloc includes request_id" {

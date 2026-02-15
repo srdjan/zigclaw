@@ -233,8 +233,10 @@ Optional per-client gateway throttling:
 ```toml
 [gateway]
 rate_limit_enabled = true
+rate_limit_store = "memory" # "memory" | "file"
 rate_limit_window_ms = 1000
 rate_limit_max_requests = 60
+rate_limit_dir = "./.zigclaw/gateway_rate_limit" # used when store="file"
 ```
 When exceeded, the gateway returns `429 Too Many Requests`.
 

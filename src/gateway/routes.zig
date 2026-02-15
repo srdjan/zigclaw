@@ -6,6 +6,7 @@ const pairing = @import("../security/pairing.zig");
 const tools_rt = @import("../tools/manifest_runtime.zig");
 const agent_loop = @import("../agent/loop.zig");
 const queue_worker = @import("../queue/worker.zig");
+const decision_log = @import("../decision_log.zig");
 
 pub const Resp = struct {
     status: u16,
@@ -18,6 +19,20 @@ pub const Resp = struct {
 
 pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.ValidatedConfig, req: http.RequestOwned, token: []const u8, request_id: []const u8) !Resp {
     const path, const query = splitTarget(req.target);
+    const decisions = decision_log.Logger.fromConfig(cfg, io);
+
+    const bytes_allowed = req.raw.len <= cfg.raw.security.max_request_bytes;
+    decisions.log(a, .{
+        .ts_unix_ms = decision_log.nowUnixMs(io),
+        .request_id = request_id,
+        .prompt_hash = null,
+        .decision = "gateway.request_bytes",
+        .subject = path,
+        .allowed = bytes_allowed,
+        .reason = if (bytes_allowed) "allowed: request within max_request_bytes" else "denied: request exceeds max_request_bytes",
+        .policy_hash = cfg.policy.policyHash(),
+    });
+    if (!bytes_allowed) return try jsonError(a, 413, request_id, "RequestTooLarge");
 
     if (std.mem.eql(u8, path, "/health")) {
         const body = try jsonObj(a, .{
@@ -28,7 +43,19 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         return .{ .status = 200, .body = body };
     }
 
-    if (!isAuthorized(req, token)) {
+    const authed = isAuthorized(req, token);
+    decisions.log(a, .{
+        .ts_unix_ms = decision_log.nowUnixMs(io),
+        .request_id = request_id,
+        .prompt_hash = null,
+        .decision = "gateway.auth",
+        .subject = path,
+        .allowed = authed,
+        .reason = if (authed) "allowed: valid bearer token" else "denied: missing/invalid bearer token",
+        .policy_hash = cfg.policy.policyHash(),
+    });
+
+    if (!authed) {
         return try jsonError(a, 401, request_id, "missing/invalid Authorization Bearer token");
     }
 

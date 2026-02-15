@@ -1268,6 +1268,90 @@ test "gateway queue metrics route returns queue counts" {
     try std.testing.expect(incoming_total_v.integer >= 1);
 }
 
+test "gateway decision log records auth and request size boundaries" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const log_dir = "tests/.tmp_gateway_decisions";
+    std.Io.Dir.cwd().deleteTree(io, log_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, log_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.logging.enabled = true;
+    vcq.raw.logging.dir = log_dir;
+    vcq.raw.logging.file = "decisions.jsonl";
+    vcq.raw.logging.max_file_bytes = 1024 * 1024;
+    vcq.raw.logging.max_files = 2;
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    // Unauthorized call -> gateway.auth denied
+    var req_unauth = try makeGatewayRequest(a, "GET", "/v1/tools", null, "");
+    defer req_unauth.deinit(a);
+    var resp_unauth = try gw_routes.handle(a, io, &app, vcq, req_unauth, "tok_ok", "rid_auth_bad");
+    defer resp_unauth.deinit(a);
+    try std.testing.expectEqual(@as(u16, 401), resp_unauth.status);
+
+    // Authorized call -> gateway.auth allowed + request size allowed
+    var req_auth = try makeGatewayRequest(a, "GET", "/v1/tools", "tok_ok", "");
+    defer req_auth.deinit(a);
+    var resp_auth = try gw_routes.handle(a, io, &app, vcq, req_auth, "tok_ok", "rid_auth_ok");
+    defer resp_auth.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_auth.status);
+
+    // Too large request -> gateway.request_bytes denied
+    vcq.raw.security.max_request_bytes = 10;
+    var req_large = try makeGatewayRequest(a, "POST", "/v1/agent", "tok_ok", "{\"message\":\"this body is too large\"}");
+    defer req_large.deinit(a);
+    var resp_large = try gw_routes.handle(a, io, &app, vcq, req_large, "tok_ok", "rid_size_bad");
+    defer resp_large.deinit(a);
+    try std.testing.expectEqual(@as(u16, 413), resp_large.status);
+
+    const log_path = try std.fs.path.join(a, &.{ log_dir, "decisions.jsonl" });
+    defer a.free(log_path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, log_path, a, std.Io.Limit.limited(1024 * 1024));
+    defer a.free(bytes);
+
+    var saw_auth_deny = false;
+    var saw_auth_allow = false;
+    var saw_size_deny = false;
+
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, line, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const obj = parsed.value.object;
+
+        const d = obj.get("decision") orelse return error.BadGolden;
+        if (d != .string) return error.BadGolden;
+        const allowed = obj.get("allowed") orelse return error.BadGolden;
+        if (allowed != .bool) return error.BadGolden;
+
+        if (std.mem.eql(u8, d.string, "gateway.auth") and !allowed.bool) saw_auth_deny = true;
+        if (std.mem.eql(u8, d.string, "gateway.auth") and allowed.bool) saw_auth_allow = true;
+        if (std.mem.eql(u8, d.string, "gateway.request_bytes") and !allowed.bool) saw_size_deny = true;
+    }
+
+    try std.testing.expect(saw_auth_deny);
+    try std.testing.expect(saw_auth_allow);
+    try std.testing.expect(saw_size_deny);
+}
+
 test "ToolRunResult toJsonAlloc includes request_id" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

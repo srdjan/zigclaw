@@ -15,6 +15,8 @@ Implemented:
 - Decision categories now include provider and memory pathways:
   `provider.network`, `provider.select`, `provider.fixtures`, `provider.reliable`,
   `memory.backend`, and `memory.recall`.
+- Gateway boundaries are now covered as decision categories:
+  `gateway.auth` and `gateway.request_bytes`.
 
 Next:
-- Add policy decision coverage for gateway auth/rate-limit boundaries.
+- Add explicit per-client rate limiting with decision events for throttle allow/deny.

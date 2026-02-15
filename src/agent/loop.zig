@@ -14,12 +14,18 @@ const default_max_delegate_depth: usize = 3;
 const delegate_tool_name = "delegate_agent";
 const delegate_tool_description = "Delegate a sub-task to another configured agent.";
 
+pub const CancelCheck = struct {
+    ctx: ?*anyopaque,
+    func: *const fn (ctx: ?*anyopaque) anyerror!bool,
+};
+
 pub const RunOptions = struct {
     verbose: bool = false,
     interactive: bool = false,
     agent_id: ?[]const u8 = null,
     delegate_depth: usize = 0,
     max_delegate_depth: usize = default_max_delegate_depth,
+    cancel_check: ?CancelCheck = null,
 };
 
 const ActiveAgent = struct {
@@ -107,6 +113,8 @@ pub fn runLoop(
     request_id: []const u8,
     opts: RunOptions,
 ) anyerror!AgentResult {
+    if (try cancelRequested(opts)) return error.Canceled;
+
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const ta = arena.allocator();
@@ -170,6 +178,15 @@ pub fn runLoop(
     // Iterative loop
     var turn: usize = 0;
     while (turn < max_agent_turns) : (turn += 1) {
+        if (try cancelRequested(opts)) {
+            logger.logJson(ta, .agent_run, request_id, .{
+                .status = "canceled",
+                .turn = turn,
+                .agent_id = active_agent.id,
+            });
+            return error.Canceled;
+        }
+
         logger.logJson(ta, .provider_call, request_id, .{
             .kind = @tagName(run_cfg.raw.provider_primary.kind),
             .model = run_cfg.raw.provider_primary.model,
@@ -240,6 +257,15 @@ pub fn runLoop(
 
         // Execute each tool call and append results
         for (resp.tool_calls) |tc| {
+            if (try cancelRequested(opts)) {
+                logger.logJson(ta, .agent_run, request_id, .{
+                    .status = "canceled",
+                    .turn = turn,
+                    .agent_id = active_agent.id,
+                });
+                return error.Canceled;
+            }
+
             logger.logJson(ta, .tool_run, request_id, .{
                 .tool = tc.name,
                 .tool_call_id = tc.id,
@@ -568,4 +594,9 @@ fn verboseLog(io: std.Io, comptime fmt: []const u8, args: anytype) void {
     var w = std.Io.File.stderr().writer(io, &buf);
     w.interface.print(fmt, args) catch {};
     w.flush() catch {};
+}
+
+fn cancelRequested(opts: RunOptions) anyerror!bool {
+    const chk = opts.cancel_check orelse return false;
+    return chk.func(chk.ctx);
 }

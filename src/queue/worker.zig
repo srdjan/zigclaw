@@ -10,7 +10,8 @@ pub const WorkerOptions = struct {
     poll_ms_override: ?u32 = null,
 };
 
-const QueueState = enum { queued, processing, completed, not_found };
+const QueueState = enum { queued, processing, completed, canceled, not_found };
+const cancel_marker_suffix = ".cancel";
 
 const JobKind = enum { agent };
 
@@ -92,6 +93,7 @@ pub fn statusJsonAlloc(
     var state: QueueState = .not_found;
     var selected_name: ?[]u8 = null;
     var selected_dir: ?[]const u8 = null;
+    var cancel_pending = false;
     defer if (selected_name) |n| a.free(n);
 
     selected_name = try newestMatchingFileNameAlloc(a, io, resolved.outgoing, request_id);
@@ -103,11 +105,20 @@ pub fn statusJsonAlloc(
         if (selected_name != null) {
             state = .processing;
             selected_dir = resolved.processing;
+            const marker_path = try cancelMarkerPathAlloc(a, resolved, request_id);
+            defer a.free(marker_path);
+            cancel_pending = hasCancelMarkerAtPath(io, marker_path);
         } else {
             selected_name = try newestMatchingFileNameAlloc(a, io, resolved.incoming, request_id);
             if (selected_name != null) {
                 state = .queued;
                 selected_dir = resolved.incoming;
+            } else {
+                selected_name = try newestMatchingFileNameAlloc(a, io, resolved.canceled, request_id);
+                if (selected_name != null) {
+                    state = .canceled;
+                    selected_dir = resolved.canceled;
+                }
             }
         }
     }
@@ -133,6 +144,10 @@ pub fn statusJsonAlloc(
     try stream.write(@tagName(state));
     try stream.objectField("found");
     try stream.write(state != .not_found);
+    if (state == .processing) {
+        try stream.objectField("cancel_pending");
+        try stream.write(cancel_pending);
+    }
     if (selected_name) |name| {
         try stream.objectField("file");
         try stream.write(name);
@@ -140,6 +155,72 @@ pub fn statusJsonAlloc(
     if (payload) |p| {
         try stream.objectField("result_json");
         try stream.write(std.mem.trimEnd(u8, p, "\r\n"));
+    }
+    try stream.endObject();
+    return try aw.toOwnedSlice();
+}
+
+pub fn cancelRequestJsonAlloc(
+    a: std.mem.Allocator,
+    io: std.Io,
+    cfg: config.ValidatedConfig,
+    request_id: []const u8,
+) ![]u8 {
+    if (request_id.len == 0) return error.InvalidArgs;
+
+    const resolved = try resolvePaths(a, cfg);
+    defer resolved.deinit(a);
+    try ensureDirs(io, resolved);
+
+    var state: QueueState = .not_found;
+    var canceled = false;
+    var moved: usize = 0;
+    var already_canceled = false;
+    var cancel_pending = false;
+
+    if (try dirContainsRequest(io, resolved.outgoing, request_id)) {
+        state = .completed;
+    } else if (try dirContainsRequest(io, resolved.processing, request_id)) {
+        const marker_path = try cancelMarkerPathAlloc(a, resolved, request_id);
+        defer a.free(marker_path);
+        const marker_existed = hasCancelMarkerAtPath(io, marker_path);
+        if (!marker_existed) try writeCancelMarker(io, marker_path, request_id);
+
+        state = .processing;
+        canceled = true;
+        cancel_pending = true;
+        already_canceled = marker_existed;
+    } else {
+        moved = try moveMatchingFiles(a, io, resolved.incoming, resolved.canceled, request_id);
+        if (moved > 0) {
+            state = .canceled;
+            canceled = true;
+        } else if (try dirContainsRequest(io, resolved.canceled, request_id)) {
+            state = .canceled;
+            canceled = true;
+            already_canceled = true;
+        }
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+    try stream.beginObject();
+    try stream.objectField("request_id");
+    try stream.write(request_id);
+    try stream.objectField("state");
+    try stream.write(@tagName(state));
+    try stream.objectField("canceled");
+    try stream.write(canceled);
+    try stream.objectField("moved");
+    try stream.write(moved);
+    if (cancel_pending) {
+        try stream.objectField("cancel_pending");
+        try stream.write(true);
+    }
+    if (already_canceled) {
+        try stream.objectField("already_canceled");
+        try stream.write(true);
     }
     try stream.endObject();
     return try aw.toOwnedSlice();
@@ -176,12 +257,16 @@ const QueuePaths = struct {
     incoming: []u8,
     processing: []u8,
     outgoing: []u8,
+    canceled: []u8,
+    cancel_requests: []u8,
 
     fn deinit(self: QueuePaths, a: std.mem.Allocator) void {
         a.free(self.base);
         a.free(self.incoming);
         a.free(self.processing);
         a.free(self.outgoing);
+        a.free(self.canceled);
+        a.free(self.cancel_requests);
     }
 };
 
@@ -198,12 +283,18 @@ fn resolvePaths(a: std.mem.Allocator, cfg: config.ValidatedConfig) !QueuePaths {
     errdefer a.free(processing);
     const outgoing = try std.fs.path.join(a, &.{ base, "outgoing" });
     errdefer a.free(outgoing);
+    const canceled = try std.fs.path.join(a, &.{ base, "canceled" });
+    errdefer a.free(canceled);
+    const cancel_requests = try std.fs.path.join(a, &.{ base, "cancel_requests" });
+    errdefer a.free(cancel_requests);
 
     return .{
         .base = base,
         .incoming = incoming,
         .processing = processing,
         .outgoing = outgoing,
+        .canceled = canceled,
+        .cancel_requests = cancel_requests,
     };
 }
 
@@ -211,6 +302,7 @@ fn requestIdExists(io: std.Io, p: QueuePaths, request_id: []const u8) !bool {
     if (try dirContainsRequest(io, p.incoming, request_id)) return true;
     if (try dirContainsRequest(io, p.processing, request_id)) return true;
     if (try dirContainsRequest(io, p.outgoing, request_id)) return true;
+    if (try dirContainsRequest(io, p.canceled, request_id)) return true;
     return false;
 }
 
@@ -230,6 +322,8 @@ fn ensureDirs(io: std.Io, p: QueuePaths) !void {
     try std.Io.Dir.cwd().createDirPath(io, p.incoming);
     try std.Io.Dir.cwd().createDirPath(io, p.processing);
     try std.Io.Dir.cwd().createDirPath(io, p.outgoing);
+    try std.Io.Dir.cwd().createDirPath(io, p.canceled);
+    try std.Io.Dir.cwd().createDirPath(io, p.cancel_requests);
 }
 
 fn recoverProcessing(a: std.mem.Allocator, io: std.Io, p: QueuePaths) !void {
@@ -279,6 +373,9 @@ fn processOne(
     };
     defer job.deinit(a);
 
+    const marker_path = try cancelMarkerPathAlloc(a, p, job.request_id);
+    defer a.free(marker_path);
+
     logger.logJson(a, .queue_job, job.request_id, .{
         .status = "start",
         .attempt = job.attempt,
@@ -296,12 +393,43 @@ fn processOne(
         return true;
     }
 
+    if (hasCancelMarkerAtPath(io, marker_path)) {
+        _ = try moveFileByName(a, io, p.processing, p.canceled, name.?);
+        clearCancelMarker(io, marker_path);
+        logger.logJson(a, .queue_job, job.request_id, .{
+            .status = "canceled",
+            .attempt = job.attempt,
+            .reason = "marker_before_run",
+        });
+        return true;
+    }
+
+    var cancel_ctx = CancelCheckCtx{
+        .io = io,
+        .marker_path = marker_path,
+    };
+
     const ro = loop.RunOptions{
         .agent_id = if (job.agent_id.len > 0) job.agent_id else null,
         .interactive = false,
+        .cancel_check = .{
+            .ctx = &cancel_ctx,
+            .func = cancelCheckCallback,
+        },
     };
 
     var res = loop.runLoop(a, io, cfg, job.message, job.request_id, ro) catch |e| {
+        if (e == error.Canceled or hasCancelMarkerAtPath(io, marker_path)) {
+            _ = try moveFileByName(a, io, p.processing, p.canceled, name.?);
+            clearCancelMarker(io, marker_path);
+            logger.logJson(a, .queue_job, job.request_id, .{
+                .status = "canceled",
+                .attempt = job.attempt,
+                .reason = @errorName(e),
+            });
+            return true;
+        }
+
         if (job.attempt < job.max_retries) {
             job.attempt += 1;
             const payload = try encodeJob(a, job);
@@ -340,6 +468,7 @@ fn processOne(
 
     try writeOutcomeOk(a, io, p.outgoing, job.request_id, job.attempt, res.turns, res.content);
     _ = std.Io.Dir.cwd().deleteFile(io, proc_path) catch {};
+    clearCancelMarker(io, marker_path);
 
     logger.logJson(a, .queue_job, job.request_id, .{
         .status = "ok",
@@ -347,6 +476,17 @@ fn processOne(
         .turns = res.turns,
     });
     return true;
+}
+
+const CancelCheckCtx = struct {
+    io: std.Io,
+    marker_path: []const u8,
+};
+
+fn cancelCheckCallback(ctx: ?*anyopaque) anyerror!bool {
+    const c = ctx orelse return false;
+    const cc: *const CancelCheckCtx = @ptrCast(@alignCast(c));
+    return hasCancelMarkerAtPath(cc.io, cc.marker_path);
 }
 
 fn oldestIncomingNameAlloc(a: std.mem.Allocator, io: std.Io, incoming_dir: []const u8) !?[]u8 {
@@ -394,6 +534,62 @@ fn newestMatchingFileNameAlloc(a: std.mem.Allocator, io: std.Io, dir_path: []con
         }
     }
     return best;
+}
+
+fn moveMatchingFiles(a: std.mem.Allocator, io: std.Io, src_dir: []const u8, dst_dir: []const u8, request_id: []const u8) !usize {
+    var dir = std.Io.Dir.cwd().openDir(io, src_dir, .{}) catch return 0;
+    defer dir.close(io);
+
+    var moved: usize = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        if (!matchesRequestFileName(ent.name, request_id)) continue;
+
+        const from = try std.fs.path.join(a, &.{ src_dir, ent.name });
+        defer a.free(from);
+        const to = try std.fs.path.join(a, &.{ dst_dir, ent.name });
+        defer a.free(to);
+
+        std.Io.Dir.rename(std.Io.Dir.cwd(), from, std.Io.Dir.cwd(), to, io) catch continue;
+        moved += 1;
+    }
+    return moved;
+}
+
+fn moveFileByName(a: std.mem.Allocator, io: std.Io, src_dir: []const u8, dst_dir: []const u8, name: []const u8) !bool {
+    const from = try std.fs.path.join(a, &.{ src_dir, name });
+    defer a.free(from);
+    const to = try std.fs.path.join(a, &.{ dst_dir, name });
+    defer a.free(to);
+
+    std.Io.Dir.rename(std.Io.Dir.cwd(), from, std.Io.Dir.cwd(), to, io) catch return false;
+    return true;
+}
+
+fn cancelMarkerPathAlloc(a: std.mem.Allocator, p: QueuePaths, request_id: []const u8) ![]u8 {
+    const marker_name = try std.fmt.allocPrint(a, "{s}{s}", .{ request_id, cancel_marker_suffix });
+    defer a.free(marker_name);
+    return std.fs.path.join(a, &.{ p.cancel_requests, marker_name });
+}
+
+fn hasCancelMarkerAtPath(io: std.Io, marker_path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(io, marker_path, .{}) catch return false;
+    return true;
+}
+
+fn writeCancelMarker(io: std.Io, marker_path: []const u8, request_id: []const u8) !void {
+    var f = try std.Io.Dir.cwd().createFile(io, marker_path, .{ .truncate = true });
+    defer f.close(io);
+    var buf: [256]u8 = undefined;
+    var w = f.writer(io, &buf);
+    try w.interface.writeAll(request_id);
+    try w.interface.writeAll("\n");
+    try w.flush();
+}
+
+fn clearCancelMarker(io: std.Io, marker_path: []const u8) void {
+    _ = std.Io.Dir.cwd().deleteFile(io, marker_path) catch {};
 }
 
 fn matchesRequestFileName(name: []const u8, request_id: []const u8) bool {

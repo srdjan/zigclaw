@@ -92,6 +92,11 @@ Run worker continuously:
 zig-out/bin/zigclaw queue worker
 ```
 
+Cancel a queued request:
+```sh
+zig-out/bin/zigclaw queue cancel --request-id req_123
+```
+
 Inspect a request:
 ```sh
 zig-out/bin/zigclaw queue status --request-id req_123
@@ -108,6 +113,8 @@ max_retries = 2
 
 Notes:
 - `queue enqueue-agent` is idempotent by `request_id`; duplicate IDs are rejected with `DuplicateRequestId`.
+- `queue status` states are: `queued`, `processing`, `completed`, `canceled`, `not_found`.
+- Canceling a `processing` request returns `state=processing` with `cancel_pending=true`; it transitions to `canceled` when the worker observes the cancel marker.
 
 ## Layout
 - `src/` native zigclaw core
@@ -203,6 +210,9 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 curl -sS -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:8787/v1/requests/req_demo_1
+
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8787/v1/requests/req_demo_1/cancel
 ```
 
 

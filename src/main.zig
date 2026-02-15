@@ -232,6 +232,18 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
 
+        if (std.mem.eql(u8, sub, "cancel")) {
+            const rid = flagValue(argv, "--request-id") orelse return error.InvalidArgs;
+            const out = try @import("queue/worker.zig").cancelRequestJsonAlloc(a, io, validated, rid);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
         try usage(io);
         return;
     }
@@ -400,6 +412,8 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
     dir.createDirPath(io, ".zigclaw/queue/incoming") catch {};
     dir.createDirPath(io, ".zigclaw/queue/processing") catch {};
     dir.createDirPath(io, ".zigclaw/queue/outgoing") catch {};
+    dir.createDirPath(io, ".zigclaw/queue/canceled") catch {};
+    dir.createDirPath(io, ".zigclaw/queue/cancel_requests") catch {};
 
     try ow.interface.writeAll("Created zigclaw.toml and .zigclaw/ directories.\n");
     try ow.interface.writeAll("Next steps:\n");
@@ -426,6 +440,7 @@ fn usage(io: std.Io) !void {
         \\  zigclaw queue enqueue-agent --message "..." [--agent id] [--request-id id] [--config zigclaw.toml]
         \\  zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.toml]
         \\  zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]
+        \\  zigclaw queue cancel --request-id <id> [--config zigclaw.toml]
         \\  zigclaw config validate [--config zigclaw.toml] [--format toml|text]
         \\  zigclaw policy hash [--config zigclaw.toml]
         \\  zigclaw policy explain --tool <name> [--config zigclaw.toml]

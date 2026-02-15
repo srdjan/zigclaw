@@ -12,10 +12,14 @@ Implemented:
   - `GET /v1/tools/<tool>` -> manifest JSON
   - `POST /v1/tools/run` body: `{ "tool": "...", "args": {...} }`
   - `POST /v1/agent/enqueue` body: `{ "message": "...", "request_id"?: "...", "agent_id"?: "..." }` -> queue async run (`202`)
-  - `GET /v1/requests/<request_id>[?include_payload=1]` -> queue state JSON (`queued|processing|completed|not_found`)
+  - `GET /v1/requests/<request_id>[?include_payload=1]` -> queue state JSON (`queued|processing|completed|canceled|not_found`)
+  - `POST /v1/requests/<request_id>/cancel` -> attempts cancellation; returns queue cancellation result JSON
   - `POST /v1/agent` body: `{ "message": "..." }`
 
 Notes:
 - Minimal HTTP/1.1 parser (request-line + headers + content-length).
 - One-request-per-connection (simple, predictable).
 - The gateway is intended for **localhost** usage; if you bind to 0.0.0.0 you should additionally firewall it.
+- Cancel behavior:
+  - queued requests are moved to `canceled` immediately
+  - processing requests return `state=processing` + `cancel_pending=true` and transition to `canceled` at cooperative worker checks

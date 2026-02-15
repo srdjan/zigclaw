@@ -103,6 +103,15 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         return .{ .status = 202, .body = body };
     }
 
+    if (std.mem.eql(u8, req.method, "POST") and std.mem.startsWith(u8, path, "/v1/requests/") and std.mem.endsWith(u8, path, "/cancel")) {
+        const rid = requestIdFromCancelPath(path) orelse return jsonError(a, 400, request_id, "request id required");
+        const body = queue_worker.cancelRequestJsonAlloc(a, io, cfg, rid) catch |e| switch (e) {
+            error.InvalidArgs => return jsonError(a, 400, request_id, @errorName(e)),
+            else => return jsonError(a, 500, request_id, @errorName(e)),
+        };
+        return .{ .status = 200, .body = body };
+    }
+
     if (std.mem.eql(u8, req.method, "GET") and std.mem.startsWith(u8, path, "/v1/requests/")) {
         const rid = path["/v1/requests/".len..];
         if (rid.len == 0) return try jsonError(a, 400, request_id, "request id required");
@@ -188,4 +197,17 @@ fn queryHasTruthy(query: ?[]const u8, key: []const u8) bool {
         return false;
     }
     return false;
+}
+
+fn requestIdFromCancelPath(path: []const u8) ?[]const u8 {
+    const prefix = "/v1/requests/";
+    const suffix = "/cancel";
+    if (!std.mem.startsWith(u8, path, prefix)) return null;
+    if (!std.mem.endsWith(u8, path, suffix)) return null;
+    if (path.len <= prefix.len + suffix.len) return null;
+
+    const rid = path[prefix.len .. path.len - suffix.len];
+    if (rid.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, rid, '/') != null) return null;
+    return rid;
 }

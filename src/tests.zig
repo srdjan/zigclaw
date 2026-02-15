@@ -360,6 +360,155 @@ test "queue enqueue-agent rejects duplicate request_id" {
     );
 }
 
+test "queue cancel queued request preserves canceled state" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_queue_cancel";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.observability.enabled = false;
+
+    const rid = try queue_worker.enqueueAgent(a, io, vcq, "hello cancel", null, "req_cancel_test");
+    defer a.free(rid);
+
+    const cancel_json = try queue_worker.cancelRequestJsonAlloc(a, io, vcq, "req_cancel_test");
+    defer a.free(cancel_json);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, cancel_json, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const state = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state == .string);
+        try std.testing.expectEqualStrings("canceled", state.string);
+        const canceled = obj.get("canceled") orelse return error.BadGolden;
+        try std.testing.expect(canceled == .bool);
+        try std.testing.expect(canceled.bool);
+    }
+
+    const canceled_dir = try std.fs.path.join(a, &.{ queue_dir, "canceled" });
+    defer a.free(canceled_dir);
+    const outgoing_dir = try std.fs.path.join(a, &.{ queue_dir, "outgoing" });
+    defer a.free(outgoing_dir);
+    try std.testing.expectEqual(@as(usize, 1), try countJsonFiles(io, canceled_dir));
+
+    try queue_worker.runWorker(a, io, vcq, .{ .once = true });
+    try std.testing.expectEqual(@as(usize, 0), try countJsonFiles(io, outgoing_dir));
+
+    const status_json = try queue_worker.statusJsonAlloc(a, io, vcq, "req_cancel_test", false);
+    defer a.free(status_json);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, status_json, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const state = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state == .string);
+        try std.testing.expectEqualStrings("canceled", state.string);
+    }
+
+    try std.testing.expectError(
+        error.DuplicateRequestId,
+        queue_worker.enqueueAgent(a, io, vcq, "requeue canceled", null, "req_cancel_test"),
+    );
+}
+
+test "queue cancel processing request becomes pending then canceled by worker" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_queue_cancel_processing";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.observability.enabled = false;
+
+    const rid = try queue_worker.enqueueAgent(a, io, vcq, "hello cancel processing", null, "req_cancel_processing_test");
+    defer a.free(rid);
+
+    const incoming_dir = try std.fs.path.join(a, &.{ queue_dir, "incoming" });
+    defer a.free(incoming_dir);
+    const processing_dir = try std.fs.path.join(a, &.{ queue_dir, "processing" });
+    defer a.free(processing_dir);
+    const canceled_dir = try std.fs.path.join(a, &.{ queue_dir, "canceled" });
+    defer a.free(canceled_dir);
+    const outgoing_dir = try std.fs.path.join(a, &.{ queue_dir, "outgoing" });
+    defer a.free(outgoing_dir);
+
+    const queued_name = try firstJsonFileNameAlloc(a, io, incoming_dir);
+    defer if (queued_name) |n| a.free(n);
+    try std.testing.expect(queued_name != null);
+
+    const from = try std.fs.path.join(a, &.{ incoming_dir, queued_name.? });
+    defer a.free(from);
+    const to = try std.fs.path.join(a, &.{ processing_dir, queued_name.? });
+    defer a.free(to);
+    try std.Io.Dir.rename(std.Io.Dir.cwd(), from, std.Io.Dir.cwd(), to, io);
+
+    const cancel_json = try queue_worker.cancelRequestJsonAlloc(a, io, vcq, "req_cancel_processing_test");
+    defer a.free(cancel_json);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, cancel_json, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const state = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state == .string);
+        try std.testing.expectEqualStrings("processing", state.string);
+        const canceled = obj.get("canceled") orelse return error.BadGolden;
+        try std.testing.expect(canceled == .bool);
+        try std.testing.expect(canceled.bool);
+        const pending = obj.get("cancel_pending") orelse return error.BadGolden;
+        try std.testing.expect(pending == .bool);
+        try std.testing.expect(pending.bool);
+    }
+
+    try queue_worker.runWorker(a, io, vcq, .{ .once = true });
+
+    try std.testing.expectEqual(@as(usize, 1), try countJsonFiles(io, canceled_dir));
+    try std.testing.expectEqual(@as(usize, 0), try countJsonFiles(io, outgoing_dir));
+
+    const status_json = try queue_worker.statusJsonAlloc(a, io, vcq, "req_cancel_processing_test", false);
+    defer a.free(status_json);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, status_json, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const state = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state == .string);
+        try std.testing.expectEqualStrings("canceled", state.string);
+    }
+}
+
 const tool_manifest = @import("tools/manifest.zig");
 const tool_schema = @import("tools/schema.zig");
 
@@ -692,6 +841,157 @@ test "gateway async queue routes enqueue, conflict, and status" {
         const result = obj.get("result_json") orelse return error.BadGolden;
         try std.testing.expect(result == .string);
         try std.testing.expect(std.mem.indexOf(u8, result.string, "\"ok\":true") != null);
+    }
+}
+
+test "gateway queue cancel route transitions request to canceled" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_gateway_cancel";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.observability.enabled = false;
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    const token = "tok_gateway_cancel";
+    const enqueue_body = "{\"message\":\"hello cancel\",\"request_id\":\"gw_req_cancel_1\"}";
+
+    var req_enqueue = try makeGatewayRequest(a, "POST", "/v1/agent/enqueue", token, enqueue_body);
+    defer req_enqueue.deinit(a);
+    var resp_enqueue = try gw_routes.handle(a, io, &app, vcq, req_enqueue, token, "http_req_c1");
+    defer resp_enqueue.deinit(a);
+    try std.testing.expectEqual(@as(u16, 202), resp_enqueue.status);
+
+    var req_cancel = try makeGatewayRequest(a, "POST", "/v1/requests/gw_req_cancel_1/cancel", token, "");
+    defer req_cancel.deinit(a);
+    var resp_cancel = try gw_routes.handle(a, io, &app, vcq, req_cancel, token, "http_req_c2");
+    defer resp_cancel.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_cancel.status);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_cancel.body, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const state = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state == .string);
+        try std.testing.expectEqualStrings("canceled", state.string);
+    }
+
+    var req_status = try makeGatewayRequest(a, "GET", "/v1/requests/gw_req_cancel_1", token, "");
+    defer req_status.deinit(a);
+    var resp_status = try gw_routes.handle(a, io, &app, vcq, req_status, token, "http_req_c3");
+    defer resp_status.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_status.status);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_status.body, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const state = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state == .string);
+        try std.testing.expectEqualStrings("canceled", state.string);
+    }
+}
+
+test "gateway queue cancel route marks processing request cancel_pending then canceled" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_gateway_cancel_processing";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.observability.enabled = false;
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    const token = "tok_gateway_cancel_processing";
+    const enqueue_body = "{\"message\":\"hello cancel processing\",\"request_id\":\"gw_req_cancel_p1\"}";
+
+    var req_enqueue = try makeGatewayRequest(a, "POST", "/v1/agent/enqueue", token, enqueue_body);
+    defer req_enqueue.deinit(a);
+    var resp_enqueue = try gw_routes.handle(a, io, &app, vcq, req_enqueue, token, "http_req_cp1");
+    defer resp_enqueue.deinit(a);
+    try std.testing.expectEqual(@as(u16, 202), resp_enqueue.status);
+
+    const incoming_dir = try std.fs.path.join(a, &.{ queue_dir, "incoming" });
+    defer a.free(incoming_dir);
+    const processing_dir = try std.fs.path.join(a, &.{ queue_dir, "processing" });
+    defer a.free(processing_dir);
+
+    const queued_name = try firstJsonFileNameAlloc(a, io, incoming_dir);
+    defer if (queued_name) |n| a.free(n);
+    try std.testing.expect(queued_name != null);
+    const from = try std.fs.path.join(a, &.{ incoming_dir, queued_name.? });
+    defer a.free(from);
+    const to = try std.fs.path.join(a, &.{ processing_dir, queued_name.? });
+    defer a.free(to);
+    try std.Io.Dir.rename(std.Io.Dir.cwd(), from, std.Io.Dir.cwd(), to, io);
+
+    var req_cancel = try makeGatewayRequest(a, "POST", "/v1/requests/gw_req_cancel_p1/cancel", token, "");
+    defer req_cancel.deinit(a);
+    var resp_cancel = try gw_routes.handle(a, io, &app, vcq, req_cancel, token, "http_req_cp2");
+    defer resp_cancel.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_cancel.status);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_cancel.body, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const state = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state == .string);
+        try std.testing.expectEqualStrings("processing", state.string);
+        const pending = obj.get("cancel_pending") orelse return error.BadGolden;
+        try std.testing.expect(pending == .bool);
+        try std.testing.expect(pending.bool);
+    }
+
+    try queue_worker.runWorker(a, io, vcq, .{ .once = true });
+
+    var req_status = try makeGatewayRequest(a, "GET", "/v1/requests/gw_req_cancel_p1", token, "");
+    defer req_status.deinit(a);
+    var resp_status = try gw_routes.handle(a, io, &app, vcq, req_status, token, "http_req_cp3");
+    defer resp_status.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_status.status);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_status.body, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const state = obj.get("state") orelse return error.BadGolden;
+        try std.testing.expect(state == .string);
+        try std.testing.expectEqualStrings("canceled", state.string);
     }
 }
 

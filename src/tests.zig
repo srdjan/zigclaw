@@ -4,6 +4,7 @@ const paths = @import("security/paths.zig");
 const fs_util = @import("util/fs.zig");
 const pairing = @import("security/pairing.zig");
 const config = @import("config.zig");
+const queue_worker = @import("queue/worker.zig");
 
 // Helper: create a threaded Io suitable for tests that need file/network access.
 fn makeTestIo(a: std.mem.Allocator) !struct { threaded: *std.Io.Threaded, io: std.Io } {
@@ -15,6 +16,33 @@ fn makeTestIo(a: std.mem.Allocator) !struct { threaded: *std.Io.Threaded, io: st
 fn destroyTestIo(a: std.mem.Allocator, t: *std.Io.Threaded) void {
     t.deinit();
     a.destroy(t);
+}
+
+fn countJsonFiles(io: std.Io, dir_path: []const u8) !usize {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return 0;
+    defer dir.close(io);
+
+    var count: usize = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        if (!std.mem.endsWith(u8, ent.name, ".json")) continue;
+        count += 1;
+    }
+    return count;
+}
+
+fn firstJsonFileNameAlloc(a: std.mem.Allocator, io: std.Io, dir_path: []const u8) !?[]u8 {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return null;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        if (!std.mem.endsWith(u8, ent.name, ".json")) continue;
+        return try a.dupe(u8, ent.name);
+    }
+    return null;
 }
 
 test "commands.isCommandSafe denies separators" {
@@ -202,6 +230,73 @@ test "config parses static multi-agent orchestration" {
     }
     try std.testing.expect(planner_ok);
     try std.testing.expect(writer_ok);
+}
+
+test "queue enqueue-agent then worker once produces outgoing result" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_queue_worker";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.observability.enabled = false;
+
+    const rid = try queue_worker.enqueueAgent(a, io, vcq, "hello queue", null, "req_queue_test");
+    defer a.free(rid);
+    try std.testing.expectEqualStrings("req_queue_test", rid);
+
+    const incoming_dir = try std.fs.path.join(a, &.{ queue_dir, "incoming" });
+    defer a.free(incoming_dir);
+    const processing_dir = try std.fs.path.join(a, &.{ queue_dir, "processing" });
+    defer a.free(processing_dir);
+    const outgoing_dir = try std.fs.path.join(a, &.{ queue_dir, "outgoing" });
+    defer a.free(outgoing_dir);
+
+    try std.testing.expectEqual(@as(usize, 1), try countJsonFiles(io, incoming_dir));
+
+    try queue_worker.runWorker(a, io, vcq, .{ .once = true });
+
+    try std.testing.expectEqual(@as(usize, 0), try countJsonFiles(io, incoming_dir));
+    try std.testing.expectEqual(@as(usize, 0), try countJsonFiles(io, processing_dir));
+    try std.testing.expectEqual(@as(usize, 1), try countJsonFiles(io, outgoing_dir));
+
+    const out_name = try firstJsonFileNameAlloc(a, io, outgoing_dir);
+    defer if (out_name) |n| a.free(n);
+    try std.testing.expect(out_name != null);
+
+    const out_path = try std.fs.path.join(a, &.{ outgoing_dir, out_name.? });
+    defer a.free(out_path);
+    const out_bytes = try std.Io.Dir.cwd().readFileAlloc(io, out_path, a, std.Io.Limit.limited(1024 * 1024));
+    defer a.free(out_bytes);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, out_bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+
+    const obj = parsed.value.object;
+    const rid_v = obj.get("request_id") orelse return error.BadGolden;
+    try std.testing.expect(rid_v == .string);
+    try std.testing.expectEqualStrings("req_queue_test", rid_v.string);
+
+    const ok_v = obj.get("ok") orelse return error.BadGolden;
+    try std.testing.expect(ok_v == .bool);
+    try std.testing.expect(ok_v.bool);
 }
 
 const tool_manifest = @import("tools/manifest.zig");

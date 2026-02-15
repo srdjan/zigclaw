@@ -3,6 +3,7 @@ const config = @import("../config.zig");
 
 pub const EventKind = enum {
     gateway_request,
+    queue_job,
     tool_run,
     agent_run,
     provider_call,

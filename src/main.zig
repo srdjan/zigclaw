@@ -185,6 +185,44 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "queue")) {
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
+        const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+        var validated = try app.loadConfig(cfg_path);
+        defer validated.deinit(a);
+
+        if (std.mem.eql(u8, sub, "enqueue-agent")) {
+            const msg = flagValue(argv, "--message") orelse return error.InvalidArgs;
+            const agent_id = flagValue(argv, "--agent");
+            const request_id = flagValue(argv, "--request-id");
+
+            const rid = try @import("queue/worker.zig").enqueueAgent(a, io, validated, msg, agent_id, request_id);
+            defer a.free(rid);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{{\"request_id\":\"{s}\",\"queued\":true}}\n", .{rid});
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "worker")) {
+            const once = hasFlag(argv, "--once");
+            const max_jobs = if (flagValue(argv, "--max-jobs")) |m| try std.fmt.parseInt(usize, m, 10) else null;
+            const poll_ms = if (flagValue(argv, "--poll-ms")) |m| try std.fmt.parseInt(u32, m, 10) else null;
+
+            try @import("queue/worker.zig").runWorker(a, io, validated, .{
+                .once = once,
+                .max_jobs = max_jobs,
+                .poll_ms_override = poll_ms,
+            });
+            return;
+        }
+
+        try usage(io);
+        return;
+    }
+
     if (std.mem.eql(u8, cmd, "policy")) {
         const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
         const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
@@ -322,6 +360,11 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\wasmtime_path = "wasmtime"
         \\plugin_dir = "./zig-out/bin"
         \\
+        \\[queue]
+        \\dir = "./.zigclaw/queue"
+        \\poll_ms = 1000
+        \\max_retries = 2
+        \\
         \\[observability]
         \\enabled = true
         \\dir = "./.zigclaw/logs"
@@ -341,6 +384,9 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
     // Create directories
     dir.createDirPath(io, ".zigclaw/memory") catch {};
     dir.createDirPath(io, ".zigclaw/logs") catch {};
+    dir.createDirPath(io, ".zigclaw/queue/incoming") catch {};
+    dir.createDirPath(io, ".zigclaw/queue/processing") catch {};
+    dir.createDirPath(io, ".zigclaw/queue/outgoing") catch {};
 
     try ow.interface.writeAll("Created zigclaw.toml and .zigclaw/ directories.\n");
     try ow.interface.writeAll("Next steps:\n");
@@ -364,6 +410,8 @@ fn usage(io: std.Io) !void {
         \\  zigclaw tools list [--config zigclaw.toml]
         \\  zigclaw tools describe <tool> [--config zigclaw.toml]
         \\  zigclaw tools run <tool> --args '{}' [--config zigclaw.toml]
+        \\  zigclaw queue enqueue-agent --message "..." [--agent id] [--request-id id] [--config zigclaw.toml]
+        \\  zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.toml]
         \\  zigclaw config validate [--config zigclaw.toml] [--format toml|text]
         \\  zigclaw policy hash [--config zigclaw.toml]
         \\  zigclaw policy explain --tool <name> [--config zigclaw.toml]

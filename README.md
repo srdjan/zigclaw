@@ -75,6 +75,31 @@ Notes:
 - Delegation is explicit through the built-in `delegate_agent` tool.
 - Each profile enforces its own `capability_preset`.
 
+## Queue (durable worker mode)
+
+Enqueue an agent job:
+```sh
+zig-out/bin/zigclaw queue enqueue-agent --message "summarize status" --agent planner
+```
+
+Run worker once (process a single queued job if present):
+```sh
+zig-out/bin/zigclaw queue worker --once
+```
+
+Run worker continuously:
+```sh
+zig-out/bin/zigclaw queue worker
+```
+
+Config:
+```toml
+[queue]
+dir = "./.zigclaw/queue"
+poll_ms = 1000
+max_retries = 2
+```
+
 ## Layout
 - `src/` native zigclaw core
 - `plugins/` WASI plugins compiled to `wasm32-wasi`

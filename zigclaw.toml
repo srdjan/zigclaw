@@ -41,6 +41,10 @@ root = "./.zigclaw/memory"
 wasmtime_path = "wasmtime"
 plugin_dir = "./zig-out/bin"
 
+[queue]
+dir = "./.zigclaw/queue"
+poll_ms = 1000
+max_retries = 2
 
 [observability]
 enabled = true

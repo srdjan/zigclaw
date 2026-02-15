@@ -50,6 +50,12 @@ pub const ToolsConfig = struct {
     plugin_dir: []const u8 = "./zig-out/bin",
 };
 
+pub const QueueConfig = struct {
+    dir: []const u8 = "./.zigclaw/queue",
+    poll_ms: u32 = 1000,
+    max_retries: u32 = 2,
+};
+
 pub const CapabilitiesConfig = struct {
     active_preset: []const u8 = "readonly",
     presets: []PresetConfig = &.{},
@@ -86,6 +92,7 @@ pub const Config = struct {
     memory: MemoryConfig = .{},
     security: SecurityConfig = .{},
     tools: ToolsConfig = .{},
+    queue: QueueConfig = .{},
     capabilities: CapabilitiesConfig = .{},
     orchestration: OrchestrationConfig = .{},
 };
@@ -117,6 +124,7 @@ pub const ValidatedConfig = struct {
             \\  memory.backend={s} root={s}
             \\  security.workspace_root={s} max_request_bytes={d}
             \\  tools.wasmtime_path={s} plugin_dir={s}
+            \\  queue.dir={s} poll_ms={d} max_retries={d}
             \\  capabilities.active_preset={s}
             \\  orchestration.leader_agent={s} agents={d}
             \\  policy.tools_allowed={d} presets={d}
@@ -138,6 +146,9 @@ pub const ValidatedConfig = struct {
             sys.security.max_request_bytes,
             sys.tools.wasmtime_path,
             sys.tools.plugin_dir,
+            sys.queue.dir,
+            sys.queue.poll_ms,
+            sys.queue.max_retries,
             sys.capabilities.active_preset,
             sys.orchestration.leader_agent,
             sys.orchestration.agents.len,
@@ -277,7 +288,15 @@ try w.print("max_files = {d}\n\n", .{self.raw.observability.max_files});
         try w.writeAll("\n");
         try w.writeAll("plugin_dir = ");
         try writeTomlString(w, self.raw.tools.plugin_dir);
+        try w.writeAll("\n\n");
+
+        // [queue]
+        try w.writeAll("[queue]\n");
+        try w.writeAll("dir = ");
+        try writeTomlString(w, self.raw.queue.dir);
         try w.writeAll("\n");
+        try w.print("poll_ms = {d}\n", .{self.raw.queue.poll_ms});
+        try w.print("max_retries = {d}\n", .{self.raw.queue.max_retries});
     }
 };
 
@@ -578,6 +597,19 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
         }
         if (std.mem.eql(u8, k, "tools.plugin_dir")) {
             cfg.tools.plugin_dir = try coerceStringDup(a, v);
+            continue;
+        }
+
+        if (std.mem.eql(u8, k, "queue.dir")) {
+            cfg.queue.dir = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "queue.poll_ms")) {
+            cfg.queue.poll_ms = try coerceU32(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "queue.max_retries")) {
+            cfg.queue.max_retries = try coerceU32(v);
             continue;
         }
 
@@ -917,6 +949,7 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
         .{ &cfg.security.workspace_root, &d.security.workspace_root },
         .{ &cfg.tools.wasmtime_path, &d.tools.wasmtime_path },
         .{ &cfg.tools.plugin_dir, &d.tools.plugin_dir },
+        .{ &cfg.queue.dir, &d.queue.dir },
         .{ &cfg.provider_primary.model, &d.provider_primary.model },
         .{ &cfg.provider_primary.base_url, &d.provider_primary.base_url },
         .{ &cfg.provider_primary.api_key, &d.provider_primary.api_key },

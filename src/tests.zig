@@ -208,6 +208,106 @@ test "policy explain outputs stable JSON (except hash)" {
     try std.testing.expectEqualStrings(expected, out);
 }
 
+test "policy explain mount reports writable and read-only access" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    const writable = try vc.policy.explainMountJsonAlloc(a, "./tmp/work");
+    defer a.free(writable);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, writable, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+
+        const allowed = obj.get("allowed") orelse return error.BadGolden;
+        try std.testing.expect(allowed == .bool and allowed.bool);
+
+        const ro = obj.get("read_only") orelse return error.BadGolden;
+        try std.testing.expect(ro == .bool and !ro.bool);
+
+        const guest = obj.get("guest_path") orelse return error.BadGolden;
+        try std.testing.expect(guest == .string);
+        try std.testing.expectEqualStrings("/write/tmp/work", guest.string);
+    }
+
+    const readonly = try vc.policy.explainMountJsonAlloc(a, "./src");
+    defer a.free(readonly);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, readonly, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+
+        const allowed = obj.get("allowed") orelse return error.BadGolden;
+        try std.testing.expect(allowed == .bool and allowed.bool);
+
+        const ro = obj.get("read_only") orelse return error.BadGolden;
+        try std.testing.expect(ro == .bool and ro.bool);
+
+        const guest = obj.get("guest_path") orelse return error.BadGolden;
+        try std.testing.expect(guest == .string);
+        try std.testing.expectEqualStrings("/workspace/src", guest.string);
+    }
+
+    const denied = try vc.policy.explainMountJsonAlloc(a, "../outside");
+    defer a.free(denied);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, denied, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+
+        const allowed = obj.get("allowed") orelse return error.BadGolden;
+        try std.testing.expect(allowed == .bool and !allowed.bool);
+        try std.testing.expect(obj.get("guest_path") == null);
+        try std.testing.expect(obj.get("read_only") == null);
+    }
+}
+
+test "policy explain command validates allowlist safety" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    const safe = try vc.policy.explainCommandJsonAlloc(a, "wasmtime run --mapdir /workspace::/workspace plugin.wasm");
+    defer a.free(safe);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, safe, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const allowed = obj.get("allowed") orelse return error.BadGolden;
+        try std.testing.expect(allowed == .bool and allowed.bool);
+    }
+
+    const unsafe = try vc.policy.explainCommandJsonAlloc(a, "wasmtime run; rm -rf /");
+    defer a.free(unsafe);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, unsafe, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const allowed = obj.get("allowed") orelse return error.BadGolden;
+        try std.testing.expect(allowed == .bool and !allowed.bool);
+    }
+}
+
 test "config parses static multi-agent orchestration" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -1117,6 +1217,53 @@ test "gateway queue cancel route marks processing request cancel_pending then ca
         try std.testing.expect(state == .string);
         try std.testing.expectEqualStrings("canceled", state.string);
     }
+}
+
+test "gateway queue metrics route returns queue counts" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_gateway_metrics";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.observability.enabled = false;
+
+    const rid = try queue_worker.enqueueAgent(a, io, vcq, "gateway metrics", null, "gw_metrics_req_1");
+    defer a.free(rid);
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    const token = "tok_gateway_metrics";
+    var req = try makeGatewayRequest(a, "GET", "/v1/queue/metrics", token, "");
+    defer req.deinit(a);
+    var resp = try gw_routes.handle(a, io, &app, vcq, req, token, "http_req_m1");
+    defer resp.deinit(a);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, resp.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const obj = parsed.value.object;
+    const incoming_total_v = obj.get("incoming_total") orelse return error.BadGolden;
+    try std.testing.expect(incoming_total_v == .integer);
+    try std.testing.expect(incoming_total_v.integer >= 1);
 }
 
 test "ToolRunResult toJsonAlloc includes request_id" {

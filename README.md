@@ -92,6 +92,11 @@ Run worker continuously:
 zig-out/bin/zigclaw queue worker
 ```
 
+View queue metrics:
+```sh
+zig-out/bin/zigclaw queue metrics
+```
+
 Cancel a queued request:
 ```sh
 zig-out/bin/zigclaw queue cancel --request-id req_123
@@ -226,6 +231,9 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:8787/v1/requests/req_demo_1/cancel
+
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8787/v1/queue/metrics
 ```
 
 

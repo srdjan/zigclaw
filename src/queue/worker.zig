@@ -633,6 +633,106 @@ fn clearCancelMarker(io: std.Io, marker_path: []const u8) void {
     _ = std.Io.Dir.cwd().deleteFile(io, marker_path) catch {};
 }
 
+pub fn metricsJsonAlloc(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig) ![]u8 {
+    const resolved = try resolvePaths(a, cfg);
+    defer resolved.deinit(a);
+    try ensureDirs(io, resolved);
+
+    const now = nowMs(io);
+    const incoming = try countIncomingMetrics(io, resolved.incoming, now);
+    const processing = try countJsonFiles(io, resolved.processing);
+    const outgoing = try countJsonFiles(io, resolved.outgoing);
+    const canceled = try countJsonFiles(io, resolved.canceled);
+    const cancel_markers = try countAllFiles(io, resolved.cancel_requests);
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+    try stream.beginObject();
+    try stream.objectField("now_ms");
+    try stream.write(now);
+    try stream.objectField("incoming_total");
+    try stream.write(incoming.total);
+    try stream.objectField("incoming_ready");
+    try stream.write(incoming.ready);
+    try stream.objectField("incoming_delayed");
+    try stream.write(incoming.delayed);
+    if (incoming.next_due_ms) |v| {
+        try stream.objectField("next_due_ms");
+        try stream.write(v);
+    }
+    try stream.objectField("processing");
+    try stream.write(processing);
+    try stream.objectField("outgoing");
+    try stream.write(outgoing);
+    try stream.objectField("canceled");
+    try stream.write(canceled);
+    try stream.objectField("cancel_markers");
+    try stream.write(cancel_markers);
+    try stream.endObject();
+    return try aw.toOwnedSlice();
+}
+
+const IncomingMetrics = struct {
+    total: usize = 0,
+    ready: usize = 0,
+    delayed: usize = 0,
+    next_due_ms: ?i64 = null,
+};
+
+fn countIncomingMetrics(io: std.Io, dir_path: []const u8, now_ms: i64) !IncomingMetrics {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return .{};
+    defer dir.close(io);
+
+    var out = IncomingMetrics{};
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        if (!std.mem.endsWith(u8, ent.name, ".json")) continue;
+        out.total += 1;
+
+        const ts = fileTimestampMs(ent.name);
+        if (ts) |t| {
+            if (t > now_ms) {
+                out.delayed += 1;
+                if (out.next_due_ms == null or t < out.next_due_ms.?) out.next_due_ms = t;
+            } else {
+                out.ready += 1;
+            }
+        } else {
+            out.ready += 1;
+        }
+    }
+    return out;
+}
+
+fn countJsonFiles(io: std.Io, dir_path: []const u8) !usize {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return 0;
+    defer dir.close(io);
+
+    var count: usize = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        if (!std.mem.endsWith(u8, ent.name, ".json")) continue;
+        count += 1;
+    }
+    return count;
+}
+
+fn countAllFiles(io: std.Io, dir_path: []const u8) !usize {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return 0;
+    defer dir.close(io);
+
+    var count: usize = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        count += 1;
+    }
+    return count;
+}
+
 fn matchesRequestFileName(name: []const u8, request_id: []const u8) bool {
     if (request_id.len == 0) return false;
     if (!std.mem.endsWith(u8, name, ".json")) return false;

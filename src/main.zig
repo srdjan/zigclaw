@@ -244,6 +244,17 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
 
+        if (std.mem.eql(u8, sub, "metrics")) {
+            const out = try @import("queue/worker.zig").metricsJsonAlloc(a, io, validated);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
         try usage(io);
         return;
     }
@@ -457,9 +468,10 @@ fn usage(io: std.Io) !void {
         \\  zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.toml]
         \\  zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]
         \\  zigclaw queue cancel --request-id <id> [--config zigclaw.toml]
+        \\  zigclaw queue metrics [--config zigclaw.toml]
         \\  zigclaw config validate [--config zigclaw.toml] [--format toml|text]
         \\  zigclaw policy hash [--config zigclaw.toml]
-        \\  zigclaw policy explain --tool <name> [--config zigclaw.toml]
+        \\  zigclaw policy explain (--tool <name> | --mount <path> | --command "cmd") [--config zigclaw.toml]
         \\  zigclaw gateway start [--bind 127.0.0.1] [--port 8787] [--config zigclaw.toml]
         \\
     );

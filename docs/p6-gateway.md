@@ -12,6 +12,7 @@ Implemented:
   - `GET /v1/tools/<tool>` -> manifest JSON
   - `POST /v1/tools/run` body: `{ "tool": "...", "args": {...} }`
   - `POST /v1/agent/enqueue` body: `{ "message": "...", "request_id"?: "...", "agent_id"?: "..." }` -> queue async run (`202`)
+  - `GET /v1/queue/metrics` -> queue depth/latency-oriented counters (`incoming_*`, `processing`, `outgoing`, `canceled`, `cancel_markers`)
   - `GET /v1/requests/<request_id>[?include_payload=1]` -> queue state JSON (`queued|processing|completed|canceled|not_found`)
   - `POST /v1/requests/<request_id>/cancel` -> attempts cancellation; returns queue cancellation result JSON
   - `POST /v1/agent` body: `{ "message": "..." }`

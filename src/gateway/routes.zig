@@ -103,6 +103,13 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         return .{ .status = 202, .body = body };
     }
 
+    if (std.mem.eql(u8, req.method, "GET") and std.mem.eql(u8, path, "/v1/queue/metrics")) {
+        const body = queue_worker.metricsJsonAlloc(a, io, cfg) catch |e| switch (e) {
+            else => return jsonError(a, 500, request_id, @errorName(e)),
+        };
+        return .{ .status = 200, .body = body };
+    }
+
     if (std.mem.eql(u8, req.method, "POST") and std.mem.startsWith(u8, path, "/v1/requests/") and std.mem.endsWith(u8, path, "/cancel")) {
         const rid = requestIdFromCancelPath(path) orelse return jsonError(a, 400, request_id, "request id required");
         const body = queue_worker.cancelRequestJsonAlloc(a, io, cfg, rid) catch |e| switch (e) {

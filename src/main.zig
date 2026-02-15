@@ -389,6 +389,8 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\dir = "./.zigclaw/queue"
         \\poll_ms = 1000
         \\max_retries = 2
+        \\retry_backoff_ms = 500
+        \\retry_jitter_pct = 20
         \\
         \\[observability]
         \\enabled = true

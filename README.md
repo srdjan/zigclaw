@@ -109,12 +109,15 @@ Config:
 dir = "./.zigclaw/queue"
 poll_ms = 1000
 max_retries = 2
+retry_backoff_ms = 500
+retry_jitter_pct = 20
 ```
 
 Notes:
 - `queue enqueue-agent` is idempotent by `request_id`; duplicate IDs are rejected with `DuplicateRequestId`.
 - `queue status` states are: `queued`, `processing`, `completed`, `canceled`, `not_found`.
 - Canceling a `processing` request returns `state=processing` with `cancel_pending=true`; it transitions to `canceled` when the worker observes the cancel marker.
+- Retry scheduling uses exponential backoff (`retry_backoff_ms`) and optional jitter (`retry_jitter_pct`).
 
 ## Layout
 - `src/` native zigclaw core

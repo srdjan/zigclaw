@@ -45,6 +45,17 @@ fn firstJsonFileNameAlloc(a: std.mem.Allocator, io: std.Io, dir_path: []const u8
     return null;
 }
 
+fn parseLeadingTimestampMs(name: []const u8) !i64 {
+    const sep = std.mem.indexOfScalar(u8, name, '_') orelse return error.BadGolden;
+    if (sep == 0) return error.BadGolden;
+    return std.fmt.parseInt(i64, name[0..sep], 10);
+}
+
+fn clockNowMs(io: std.Io) i64 {
+    const ts = std.Io.Clock.now(.real, io);
+    return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_ms));
+}
+
 test "commands.isCommandSafe denies separators" {
     try std.testing.expect(commands.isCommandSafe("ls -la"));
     try std.testing.expect(!commands.isCommandSafe("ls; rm -rf /"));

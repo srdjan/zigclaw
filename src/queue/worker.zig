@@ -353,6 +353,10 @@ fn processOne(
     if (name == null) return false;
     defer a.free(name.?);
 
+    if (fileTimestampMs(name.?)) |ts_ms| {
+        if (ts_ms > nowMs(io)) return false;
+    }
+
     const in_path = try std.fs.path.join(a, &.{ p.incoming, name.? });
     defer a.free(in_path);
     const proc_path = try std.fs.path.join(a, &.{ p.processing, name.? });
@@ -435,8 +439,10 @@ fn processOne(
             const payload = try encodeJob(a, job);
             defer a.free(payload);
 
+            const due_ms = computeRetryDueMs(io, cfg.raw.queue, job.request_id, job.attempt);
+
             const retry_name = try std.fmt.allocPrint(a, "{d}_{s}_retry{d}.json", .{
-                nowMs(io),
+                due_ms,
                 job.request_id,
                 job.attempt,
             });
@@ -451,6 +457,7 @@ fn processOne(
                 .status = "retry",
                 .attempt = job.attempt,
                 .error_name = @errorName(e),
+                .next_due_ms = due_ms,
             });
             return true;
         }
@@ -555,6 +562,40 @@ fn moveMatchingFiles(a: std.mem.Allocator, io: std.Io, src_dir: []const u8, dst_
         moved += 1;
     }
     return moved;
+}
+
+fn fileTimestampMs(name: []const u8) ?i64 {
+    const sep = std.mem.indexOfScalar(u8, name, '_') orelse return null;
+    if (sep == 0) return null;
+    return std.fmt.parseInt(i64, name[0..sep], 10) catch null;
+}
+
+fn computeRetryDueMs(io: std.Io, q: config.QueueConfig, request_id: []const u8, attempt: u32) i64 {
+    const now = nowMs(io);
+    if (q.retry_backoff_ms == 0) return now;
+
+    const shift = @min(attempt -| 1, 31);
+    const mul: u64 = @as(u64, 1) << @intCast(shift);
+    const base_u64 = @as(u64, q.retry_backoff_ms) * mul;
+    const base_i64: i64 = @intCast(@min(base_u64, @as(u64, @intCast(std.math.maxInt(i64)))));
+
+    const jitter_pct = @min(q.retry_jitter_pct, 100);
+    if (jitter_pct == 0 or base_i64 == 0) return now + base_i64;
+
+    const mag_u64 = (@as(u64, @intCast(base_i64)) * @as(u64, jitter_pct)) / 100;
+    if (mag_u64 == 0) return now + base_i64;
+
+    const mag_i64: i64 = @intCast(@min(mag_u64, @as(u64, @intCast(std.math.maxInt(i64)))));
+    const span_u64 = @as(u64, @intCast(mag_i64)) * 2 + 1;
+
+    var hasher = std.hash.Wyhash.init(0x9e3779b97f4a7c15);
+    hasher.update(request_id);
+    hasher.update(std.mem.asBytes(&attempt));
+    const r = hasher.final() % span_u64;
+    const off = @as(i64, @intCast(r)) - mag_i64;
+
+    const delay = @max(@as(i64, 0), base_i64 + off);
+    return now + delay;
 }
 
 fn moveFileByName(a: std.mem.Allocator, io: std.Io, src_dir: []const u8, dst_dir: []const u8, name: []const u8) !bool {

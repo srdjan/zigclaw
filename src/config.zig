@@ -54,6 +54,8 @@ pub const QueueConfig = struct {
     dir: []const u8 = "./.zigclaw/queue",
     poll_ms: u32 = 1000,
     max_retries: u32 = 2,
+    retry_backoff_ms: u32 = 500,
+    retry_jitter_pct: u32 = 20,
 };
 
 pub const CapabilitiesConfig = struct {
@@ -124,7 +126,7 @@ pub const ValidatedConfig = struct {
             \\  memory.backend={s} root={s}
             \\  security.workspace_root={s} max_request_bytes={d}
             \\  tools.wasmtime_path={s} plugin_dir={s}
-            \\  queue.dir={s} poll_ms={d} max_retries={d}
+            \\  queue.dir={s} poll_ms={d} max_retries={d} retry_backoff_ms={d} retry_jitter_pct={d}
             \\  capabilities.active_preset={s}
             \\  orchestration.leader_agent={s} agents={d}
             \\  policy.tools_allowed={d} presets={d}
@@ -149,6 +151,8 @@ pub const ValidatedConfig = struct {
             sys.queue.dir,
             sys.queue.poll_ms,
             sys.queue.max_retries,
+            sys.queue.retry_backoff_ms,
+            sys.queue.retry_jitter_pct,
             sys.capabilities.active_preset,
             sys.orchestration.leader_agent,
             sys.orchestration.agents.len,
@@ -297,6 +301,8 @@ try w.print("max_files = {d}\n\n", .{self.raw.observability.max_files});
         try w.writeAll("\n");
         try w.print("poll_ms = {d}\n", .{self.raw.queue.poll_ms});
         try w.print("max_retries = {d}\n", .{self.raw.queue.max_retries});
+        try w.print("retry_backoff_ms = {d}\n", .{self.raw.queue.retry_backoff_ms});
+        try w.print("retry_jitter_pct = {d}\n", .{self.raw.queue.retry_jitter_pct});
     }
 };
 
@@ -612,6 +618,14 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
             cfg.queue.max_retries = try coerceU32(v);
             continue;
         }
+        if (std.mem.eql(u8, k, "queue.retry_backoff_ms")) {
+            cfg.queue.retry_backoff_ms = try coerceU32(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "queue.retry_jitter_pct")) {
+            cfg.queue.retry_jitter_pct = try coerceU32(v);
+            continue;
+        }
 
         if (std.mem.eql(u8, k, "providers.primary.kind")) {
             const s = try coerceString(v);
@@ -720,6 +734,14 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
 
     if (cfg.config_version != 1) {
         try warns.append(.{ .key_path = try a.dupe(u8, "config_version"), .message = try std.fmt.allocPrint(a, "config_version={d} not recognized; behavior may be undefined", .{cfg.config_version}) });
+    }
+
+    if (cfg.queue.retry_jitter_pct > 100) {
+        try warns.append(.{
+            .key_path = try a.dupe(u8, "queue.retry_jitter_pct"),
+            .message = try std.fmt.allocPrint(a, "retry_jitter_pct={d} out of range; clamping to 100", .{cfg.queue.retry_jitter_pct}),
+        });
+        cfg.queue.retry_jitter_pct = 100;
     }
 
     // Build presets

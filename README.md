@@ -7,6 +7,9 @@ ZigClaw is a local-first Zig agent runtime with:
 - queue worker mode and local HTTP gateway
 - JSONL observability + decision/audit logs
 
+Reference project: TinyClaw by `jlia0` (`https://github.com/jlia0/tinyclaw`).
+Original inspiration: `zeroclaw`.
+
 This README reflects the current implementation in `src/`.
 
 ## Requirements

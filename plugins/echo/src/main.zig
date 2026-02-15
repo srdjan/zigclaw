@@ -15,15 +15,25 @@ pub fn main(init: std.process.Init) !void {
     defer parsed.deinit();
 
     const obj = parsed.value.object;
-    const request_id = obj.get("request_id").?.string;
-    const args_json = if (obj.get("args_json")) |v| v.string else "{}";
+    const request_id = if (obj.get("request_id")) |v| switch (v) {
+        .string => |s| s,
+        else => return error.MalformedInput,
+    } else return error.MalformedInput;
+
+    const args_json = if (obj.get("args_json")) |v| switch (v) {
+        .string => |s| s,
+        else => "{}",
+    } else "{}";
 
     // parse args_json string
     var args_parsed = try std.json.parseFromSlice(std.json.Value, a, args_json, .{});
     defer args_parsed.deinit();
     const aobj = args_parsed.value.object;
 
-    const text = if (aobj.get("text")) |v| v.string else "";
+    const text = if (aobj.get("text")) |v| switch (v) {
+        .string => |s| s,
+        else => "",
+    } else "";
 
     var aw: std.Io.Writer.Allocating = .init(a);
     errdefer aw.deinit();

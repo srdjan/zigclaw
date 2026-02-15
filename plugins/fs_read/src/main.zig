@@ -1,6 +1,8 @@
 const std = @import("std");
 const sdk = @import("plugin_sdk");
 
+const max_allowed_bytes: usize = 1048576; // 1 MiB upper bound
+
 pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     const io = init.io;
@@ -15,23 +17,39 @@ pub fn main(init: std.process.Init) !void {
     defer parsed.deinit();
 
     const obj = parsed.value.object;
-    const request_id = obj.get("request_id").?.string;
-    const args_json = if (obj.get("args_json")) |v| v.string else "{}";
+    const request_id = if (obj.get("request_id")) |v| switch (v) {
+        .string => |s| s,
+        else => return error.MalformedInput,
+    } else return error.MalformedInput;
 
-    // args_json is a JSON string; parse it
+    const args_json = if (obj.get("args_json")) |v| switch (v) {
+        .string => |s| s,
+        else => "{}",
+    } else "{}";
+
     var args_parsed = try std.json.parseFromSlice(std.json.Value, a, args_json, .{});
     defer args_parsed.deinit();
 
     const aobj = args_parsed.value.object;
-    const path = if (aobj.get("path")) |v| v.string else "/workspace/README.md";
-    const max_bytes: usize = if (aobj.get("max_bytes")) |v| @intCast(v.integer) else 65536;
+    const path = if (aobj.get("path")) |v| switch (v) {
+        .string => |s| s,
+        else => "/workspace/README.md",
+    } else "/workspace/README.md";
+
+    const max_bytes: usize = if (aobj.get("max_bytes")) |v| switch (v) {
+        .integer => |i| std.math.cast(usize, i) orelse max_allowed_bytes,
+        else => 65536,
+    } else 65536;
+
+    // Clamp to upper bound
+    const clamped = @min(max_bytes, max_allowed_bytes);
 
     var data_json: []u8 = undefined;
     var ok = true;
     var stdout_msg: []const u8 = "";
     const stderr_msg: []const u8 = "";
 
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, std.Io.Limit.limited(max_bytes)) catch |e| {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, std.Io.Limit.limited(clamped)) catch |e| {
         ok = false;
         data_json = try std.fmt.allocPrint(a, "{{\"error\":\"open failed\"}}", .{});
         defer a.free(data_json);

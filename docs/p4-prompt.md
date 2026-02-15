@@ -1,24 +1,31 @@
-# P4: Deterministic prompt assembly + dump/diff tooling
+# P4: Prompt and Agent Loop
 
-Implemented:
-- Workspace scanner:
-  - stable lexicographic ordering of relative paths
-  - ignore common build/system dirs: `.git`, `.zigclaw`, `zig-out`, `node_modules`, `target`
-  - skip large files (configurable constants in code for now)
-  - per-file sha256 (hex)
-- System prompt now includes:
-  - workspace root + active preset + policy hash
-  - sorted allowed tool list
-  - workspace snapshot (paths + sizes + sha256)
-  - optional full content sections for `AGENTS.md`, `SOUL.md`, `TOOLS.md` if present (truncated)
-- CLI:
-  - `zigclaw prompt dump --message "..."`
-    - `--format json|text` (default json)
-    - `--out <path>` to write to file
-  - `zigclaw prompt diff --a <path> --b <path>` line-based diff
-- Prompt hash:
-  - sha256 over: system + user + recalled memory items (title+snippet)
-  - included in dump output
+## Status
 
-Notes:
-- Diff is intentionally simple and deterministic (line-by-line). It's meant for catching prompt drift quickly.
+## Implemented
+- Deterministic prompt bundle assembly (`src/agent/bundle.zig`):
+  - system prompt
+  - user message
+  - recalled memory items
+  - `prompt_hash` (SHA-256 hex)
+  - `policy_hash`
+- System prompt composition (`src/agent/prompt.zig`) includes:
+  - workspace root
+  - active capability preset
+  - policy hash
+  - sorted allowed tools
+  - workspace snapshot (files, sizes, sha256)
+  - optional inline content of `AGENTS.md`, `SOUL.md`, `TOOLS.md` (truncated)
+- Workspace scan (`src/agent/workspace.zig`) with stable sort and ignore list.
+- CLI prompt tools:
+  - `zigclaw prompt dump --format json|text`
+  - `zigclaw prompt diff --a <file> --b <file>`
+- Multi-turn agent loop with provider tool-calling support (`src/agent/loop.zig`).
+- Static multi-agent orchestration support:
+  - `[orchestration]` + `[agents.<id>]`
+  - per-agent capability preset
+  - built-in `delegate_agent` tool when `delegate_to` is configured
+
+## Partial/Scaffolded
+- Max turns and delegation depth are fixed constants in code (`max_agent_turns = 10`, default max delegate depth `3`), not config-driven.
+- Agent stop condition is provider/tool-call driven; no additional planner/scheduler layer.

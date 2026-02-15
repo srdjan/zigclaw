@@ -1,41 +1,43 @@
-# P5: Providers (OpenAI-compatible HTTP) + recording/replay + reliable wrapper + per-turn arena
+# P5: Providers
 
-Implemented:
-- Provider kinds:
-  - `stub` (deterministic)
-  - `openai_compat` (HTTP POST to `{base_url}/chat/completions`)
-- Provider wrappers:
-  - fixtures `record`/`replay` (hash-addressed JSON fixtures)
-  - reliable retry wrapper (fixed backoff; deterministic)
-- Per-turn arena allocator in agent loop:
-  - all per-run allocations are reclaimed with `arena.deinit()`
+## Status
 
-Config:
+## Implemented
+- Provider kinds (`src/config.zig`, `ProviderKind`):
+  - `stub`
+  - `openai_compat`
+- Provider factory and wrapper composition (`src/providers/factory.zig`):
+  - base provider
+  - optional fixtures wrapper (`off|record|replay`)
+  - optional reliable retry wrapper (`retries > 0`)
+- OpenAI-compatible chat integration (`src/providers/openai_compat.zig`):
+  - POST to `{base_url}/chat/completions`
+  - request supports multi-turn messages + tool definitions
+  - parses `finish_reason`, `tool_calls`, and token usage
+- Deterministic `stub` provider for local/testing runs.
+
+## Provider Config (Current)
+
 ```toml
 [providers.primary]
-kind = "openai_compat"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
+kind = "stub" # "stub" | "openai_compat"
 model = "gpt-4.1-mini"
 temperature = 0.2
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+# optional inline secret (parsed but omitted in normalized output)
+# api_key = "..."
 
 [providers.fixtures]
-mode = "record" # or "replay"
+mode = "off" # "off" | "record" | "replay"
 dir = "./.zigclaw/fixtures"
 
 [providers.reliable]
-retries = 2
+retries = 0
 backoff_ms = 250
 ```
 
-Fixture file format: `fixtures/<sha256>.json`
-```json
-{
-  "request": { ... },
-  "response": { "content": "..." }
-}
-```
-
-Notes:
-- The OpenAI-compatible provider uses `POST /chat/completions` for broad compatibility.
-- Secrets (`api_key`) are never printed in normalized config.
+## Partial/Scaffolded
+- `openai_compat` implementation uses `curl` subprocess, not a native HTTP client.
+- Fixtures hash currently derives from legacy request fields (`model`, `temperature`, `system`, `user`, `memory_context`) and does not include full multi-turn `messages`/`tools` payload.
+- Retry wrapper classifies a fixed set of permanent errors; no external retry policy config beyond retries/backoff.

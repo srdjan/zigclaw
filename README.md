@@ -1,115 +1,144 @@
 # zigclaw
 
-A Zig port scaffold of `zeroclaw` focusing on:
-- idiomatic Zig architecture (`union(enum)` dispatch, explicit allocators, error sets)
-- capability sets (config-driven policy)
-- WASI tool plugins (JSON protocol over stdin/stdout) executed via `wasmtime`
+ZigClaw is a local-first Zig agent runtime with:
+- config-driven capability presets and compiled policy hash
+- tool execution via plugin manifests (WASI plugins and native plugins)
+- provider abstraction (`stub`, `openai_compat`) with fixture and retry wrappers
+- queue worker mode and local HTTP gateway
+- JSONL observability + decision/audit logs
 
-This repo is intentionally **scaffold-first**: it builds and runs locally, with clear TODOs for parity features.
+This README reflects the current implementation in `src/`.
 
 ## Requirements
-- Zig (tested with recent Zig 0.12+)
-- Optional (for tools): `wasmtime` in PATH
+- Zig (project currently builds/tests with Zig 0.14-era std APIs)
+- `wasmtime` in `PATH` for WASI tools (`native = false` manifests)
+- `curl` in `PATH` for:
+  - `openai_compat` provider
+  - `http_fetch` native plugin
 
 ## Quickstart
 
-Build:
+Build core binary:
 ```sh
 zig build
 ```
 
-Run agent (stub provider response for now):
-```sh
-zig build run -- agent --message "hello"
-```
-
-Run as a specific configured agent profile:
-```sh
-zig build run -- agent --message "review this change" --agent planner
-```
-
-Build WASI plugins (WASM + manifest):
+Build/install plugins and manifests to `zig-out/bin`:
 ```sh
 zig build plugins
 ```
 
-Run a plugin (requires wasmtime):
+Generate starter config (skips if `zigclaw.toml` already exists):
 ```sh
-# plugin artifacts are installed into zig-out/bin/
-zig-out/bin/zigclaw tools list
-zig-out/bin/zigclaw tools describe echo
-zig-out/bin/zigclaw tools run echo --args '{"text":"hi"}'
+zig-out/bin/zigclaw init
+```
+
+Run with local deterministic provider (no network):
+```sh
+zig-out/bin/zigclaw agent --message "hello" --config zigclaw.toml
+```
+
+Run in interactive mode:
+```sh
+zig-out/bin/zigclaw agent --interactive --config zigclaw.toml
+```
+
+## CLI Commands
+
+Command list is taken from `src/main.zig:usage()`.
+
+```text
+zigclaw init
+zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml]
+zigclaw prompt dump --message "..." [--format json|text] [--out path] [--config zigclaw.toml]
+zigclaw prompt diff --a file --b file
+zigclaw tools list [--config zigclaw.toml]
+zigclaw tools describe <tool> [--config zigclaw.toml]
+zigclaw tools run <tool> --args '{}' [--config zigclaw.toml]
+zigclaw queue enqueue-agent --message "..." [--agent id] [--request-id id] [--config zigclaw.toml]
+zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.toml]
+zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]
+zigclaw queue cancel --request-id <id> [--config zigclaw.toml]
+zigclaw queue metrics [--config zigclaw.toml]
+zigclaw config validate [--config zigclaw.toml] [--format toml|text]
+zigclaw policy hash [--config zigclaw.toml]
+zigclaw policy explain (--tool <name> | --mount <path> | --command "cmd") [--config zigclaw.toml]
+zigclaw gateway start [--bind 127.0.0.1] [--port 8787] [--config zigclaw.toml]
 ```
 
 ## Config
 
-Default config path: `./zigclaw.toml`
-
-Validate/print normalized config (stable TOML):
+Validate and print normalized config:
 ```sh
 zig-out/bin/zigclaw config validate --config zigclaw.toml --format toml
 ```
 
-Example config is included at `zigclaw.toml`.
+Normalized output is stable and omits `providers.primary.api_key`.
 
-### Static Multi-Agent Profiles (minimal)
-
+Canonical normalized example (matches `tests/golden/config_normalized.toml`):
 ```toml
-[orchestration]
-leader_agent = "planner"
+config_version = 1
 
-[agents.planner]
-capability_preset = "readonly"
-delegate_to = ["writer"]
-system_prompt = "Break work down, then delegate."
+[capabilities]
+active_preset = "dev"
 
-[agents.writer]
-capability_preset = "dev"
-delegate_to = []
-system_prompt = "Implement delegated tasks precisely."
-```
+[capabilities.presets.dev]
+tools = ["echo", "fs_read"]
+allow_network = true
+allow_write_paths = ["./.zigclaw", "./tmp"]
 
-Notes:
-- `zigclaw agent` defaults to `orchestration.leader_agent` when profiles are configured.
-- Use `--agent <id>` to run a specific profile.
-- Delegation is explicit through the built-in `delegate_agent` tool.
-- Each profile enforces its own `capability_preset`.
+[capabilities.presets.readonly]
+tools = ["echo"]
+allow_network = false
+allow_write_paths = []
 
-## Queue (durable worker mode)
+[observability]
+enabled = true
+dir = "./.zigclaw/logs"
+max_file_bytes = 1048576
+max_files = 5
 
-Enqueue an agent job:
-```sh
-zig-out/bin/zigclaw queue enqueue-agent --message "summarize status" --agent planner
-```
+[logging]
+enabled = true
+dir = "./.zigclaw"
+file = "decisions.jsonl"
+max_file_bytes = 1048576
+max_files = 5
 
-Run worker once (process a single queued job if present):
-```sh
-zig-out/bin/zigclaw queue worker --once
-```
+[gateway]
+rate_limit_enabled = false
+rate_limit_store = "memory"
+rate_limit_window_ms = 1000
+rate_limit_max_requests = 60
+rate_limit_dir = "./.zigclaw/gateway_rate_limit"
 
-Run worker continuously:
-```sh
-zig-out/bin/zigclaw queue worker
-```
+[security]
+workspace_root = "."
+max_request_bytes = 262144
 
-View queue metrics:
-```sh
-zig-out/bin/zigclaw queue metrics
-```
+[providers.primary]
+kind = "stub"
+model = "gpt-4.1-mini"
+temperature = 0.2
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
 
-Cancel a queued request:
-```sh
-zig-out/bin/zigclaw queue cancel --request-id req_123
-```
+[providers.fixtures]
+mode = "off"
+dir = "./.zigclaw/fixtures"
 
-Inspect a request:
-```sh
-zig-out/bin/zigclaw queue status --request-id req_123
-zig-out/bin/zigclaw queue status --request-id req_123 --include-payload
-```
+[providers.reliable]
+retries = 0
+backoff_ms = 250
 
-Config:
-```toml
+[memory]
+backend = "markdown"
+root = "./.zigclaw/memory"
+
+[tools]
+wasmtime_path = "wasmtime"
+plugin_dir = "./zig-out/bin"
+
 [queue]
 dir = "./.zigclaw/queue"
 poll_ms = 1000
@@ -118,157 +147,125 @@ retry_backoff_ms = 500
 retry_jitter_pct = 20
 ```
 
-Notes:
-- `queue enqueue-agent` is idempotent by `request_id`; duplicate IDs are rejected with `DuplicateRequestId`.
-- `queue status` states are: `queued`, `processing`, `completed`, `canceled`, `not_found`.
-- Canceling a `processing` request returns `state=processing` with `cancel_pending=true`; it transitions to `canceled` when the worker observes the cancel marker.
-- Retry scheduling uses exponential backoff (`retry_backoff_ms`) and optional jitter (`retry_jitter_pct`).
+## Capability Presets and Policy
 
-## Layout
-- `src/` native zigclaw core
-- `plugins/` WASI plugins compiled to `wasm32-wasi`
-- `docs/` architecture + protocol notes
-
-
-## Policy
-
-Print policy hash:
+Policy hash:
 ```sh
 zig-out/bin/zigclaw policy hash --config zigclaw.toml
 ```
 
-Explain whether a tool is allowed:
+Policy explanations:
 ```sh
 zig-out/bin/zigclaw policy explain --tool fs_read --config zigclaw.toml
-```
-
-Explain mount accessibility and mode (read-only vs writable):
-```sh
 zig-out/bin/zigclaw policy explain --mount ./tmp/work --config zigclaw.toml
-```
-
-Explain whether a command string passes the safety allowlist:
-```sh
 zig-out/bin/zigclaw policy explain --command "wasmtime run --mapdir /workspace::/workspace plugin.wasm" --config zigclaw.toml
 ```
 
-Decision logs are written as JSONL to `./.zigclaw/decisions.jsonl`.
-Policy decision events include tool, provider, memory, and gateway boundary categories.
+`policy explain --command` uses an allowlist over command bytes (`a-zA-Z0-9`, `.`, `_`, `/`, `-`, space, `:`, `=`, `,`).
 
-Decision log sink and rotation are configurable:
-```toml
-[logging]
-enabled = true
-dir = "./.zigclaw"
-file = "decisions.jsonl"
-max_file_bytes = 1048576
-max_files = 5
+## Tools
+
+List and describe installed tool manifests:
+```sh
+zig-out/bin/zigclaw tools list --config zigclaw.toml
+zig-out/bin/zigclaw tools describe echo --config zigclaw.toml
 ```
 
+Run a tool with JSON args:
+```sh
+zig-out/bin/zigclaw tools run echo --args '{"text":"hi"}' --config zigclaw.toml
+```
 
-## Prompt (deterministic)
+Execution model:
+- `native = false` (default): run `wasmtime --mapdir ... <tool>.wasm`
+- `native = true`: run host binary `<plugin_dir>/<tool>`
 
-Dump the full prompt bundle (system + user + memory) with hash:
+## Prompt and Agent Loop
+
+Prompt bundle dump/diff:
 ```sh
 zig-out/bin/zigclaw prompt dump --message "hello" --format json --config zigclaw.toml
+zig-out/bin/zigclaw prompt dump --message "hello" --format text --out /tmp/prompt.txt --config zigclaw.toml
+zig-out/bin/zigclaw prompt diff --a /tmp/prompt_a.txt --b /tmp/prompt_b.txt
 ```
 
-Write a text dump to a file:
-```sh
-zig-out/bin/zigclaw prompt dump --message "hello" --format text --out /tmp/prompt.txt
-```
-
-Diff two dumps:
-```sh
-zig-out/bin/zigclaw prompt diff --a /tmp/prompt1.txt --b /tmp/prompt2.txt
-```
-
+Agent orchestration supports optional static profiles (`[orchestration]`, `[agents.<id>]`) and a built-in `delegate_agent` tool when `delegate_to` is configured.
 
 ## Providers
 
-OpenAI-compatible:
+Primary provider config:
 ```toml
 [providers.primary]
-kind = "openai_compat"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
+kind = "openai_compat" # "stub" | "openai_compat"
 model = "gpt-4.1-mini"
 temperature = 0.2
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
 ```
 
-Record fixtures (offline / deterministic dev):
+Fixture/retry wrappers:
 ```toml
 [providers.fixtures]
-mode = "record"
+mode = "off" # "off" | "record" | "replay"
 dir = "./.zigclaw/fixtures"
+
+[providers.reliable]
+retries = 2
+backoff_ms = 250
 ```
 
-Replay fixtures (fully deterministic runs):
-```toml
-[providers.fixtures]
-mode = "replay"
-dir = "./.zigclaw/fixtures"
-```
+## Queue
 
-
-## Gateway (local HTTP)
-
-Start:
+Enqueue/run/status/cancel/metrics:
 ```sh
-zig-out/bin/zigclaw gateway start --bind 127.0.0.1 --port 8787
+zig-out/bin/zigclaw queue enqueue-agent --message "summarize status" --request-id req_demo_1 --config zigclaw.toml
+zig-out/bin/zigclaw queue worker --once --config zigclaw.toml
+zig-out/bin/zigclaw queue status --request-id req_demo_1 --config zigclaw.toml
+zig-out/bin/zigclaw queue cancel --request-id req_demo_1 --config zigclaw.toml
+zig-out/bin/zigclaw queue metrics --config zigclaw.toml
 ```
 
-Health:
+Queue states: `queued`, `processing`, `completed`, `canceled`, `not_found`.
+
+## Gateway
+
+Start local gateway:
 ```sh
-curl http://127.0.0.1:8787/health
+zig-out/bin/zigclaw gateway start --bind 127.0.0.1 --port 8787 --config zigclaw.toml
 ```
 
-The gateway prints a token on startup. Use it like:
+On startup, gateway prints bearer token and token file path (`<workspace_root>/.zigclaw/gateway.token`).
+
+Health endpoint (no auth):
 ```sh
-TOKEN="... printed ..."
-curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/tools
+curl -sS http://127.0.0.1:8787/health
 ```
 
-Optional per-client gateway throttling:
-```toml
-[gateway]
-rate_limit_enabled = true
-rate_limit_store = "memory" # "memory" | "file"
-rate_limit_window_ms = 1000
-rate_limit_max_requests = 60
-rate_limit_dir = "./.zigclaw/gateway_rate_limit" # used when store="file"
-```
-When exceeded, the gateway returns `429 Too Many Requests`.
-
-Async queue flow via gateway:
+Authenticated examples:
 ```sh
-TOKEN="... printed ..."
-curl -sS -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"message":"summarize this","request_id":"req_demo_1"}' \
-  http://127.0.0.1:8787/v1/agent/enqueue
+TOKEN="$(cat ./.zigclaw/gateway.token)"
 
-curl -sS -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8787/v1/requests/req_demo_1
-
-curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8787/v1/requests/req_demo_1/cancel
-
-curl -sS -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8787/v1/queue/metrics
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/tools
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/tools/echo
+curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"tool":"echo","args":{"text":"hi"}}' \
+  http://127.0.0.1:8787/v1/tools/run
 ```
 
+Note: some gateway responses intentionally return embedded JSON as strings (`tools_json`, `manifest_json`, `result_json`).
 
-## Observability (audit log)
+## Observability and Audit Logs
 
-ZigClaw writes JSONL logs by default to:
-- `<workspace_root>/.zigclaw/logs/zigclaw.jsonl` (rotated)
+Operational events (`[observability]`) are written to:
+- `<workspace_root>/<observability.dir>/zigclaw.jsonl`
 
-Config:
-```toml
-[observability]
-enabled = true
-dir = "./.zigclaw/logs"
-max_file_bytes = 1048576
-max_files = 5
-```
+Policy/decision audit events (`[logging]`) are written to:
+- `<workspace_root>/<logging.dir>/<logging.file>`
+
+Both sinks support size-based rotation.
+
+## Project Layout
+- `src/`: core runtime (`config`, `policy`, `agent`, `providers`, `tools`, `queue`, `gateway`)
+- `plugins/`: example tools + SDK
+- `docs/`: implementation-phase and architecture docs
+- `tests/`: golden files and fixtures

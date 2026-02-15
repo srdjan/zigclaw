@@ -1,19 +1,46 @@
-# P1: Config foundation
+# P1: Config Foundation
 
-Implemented:
-- TOML parser with a broader subset than the scaffold parser:
-  - tables `[a.b]`
-  - `key = "string" | true/false | int | float | [ ... ]`
-  - basic string escapes
-  - comments `# ...`
-- Validation pipeline:
-  - parse -> KeyMap (flattened `a.b.c` keys)
-  - typed Config fill + unknown-key warnings
-  - `config_version` supported at top-level (and `meta.config_version`)
-- Normalized output:
-  - `zigclaw config validate` prints a stable normalized TOML
+## Status
 
-Next (P1 continuation if needed):
-- Strict schema with per-field constraints (min/max, enums)
-- Better error spans (line/col)
-- Full TOML spec support (multi-line strings, datetime, inline tables)
+## Implemented
+- TOML subset parser in `src/config.zig`:
+  - tables (`[a.b]`)
+  - scalar values: string / bool / int / float
+  - arrays
+  - comments (`# ...`)
+- Flattened key map + typed config build.
+- Unknown-key warnings (ignored keys are retained as warnings, not hard errors).
+- Validation output:
+  - `zigclaw config validate --format toml` (stable normalized TOML)
+  - `zigclaw config validate --format text` (human-readable summary)
+- Secret handling: `providers.primary.api_key` can be parsed, but normalized TOML omits it.
+- Basic value guards/clamps:
+  - `queue.retry_jitter_pct > 100` -> clamped to `100` with warning
+  - `gateway.rate_limit_window_ms == 0` -> clamped to `1` with warning
+  - `gateway.rate_limit_max_requests == 0` -> clamped to `1` with warning
+
+## Partial/Scaffolded
+- Parser is intentionally not full TOML spec (no datetime/inline tables/multiline strings support).
+- Type/range validation is field-specific, not a generic declarative schema engine.
+- Error reporting is warning/key-oriented; no rich line/column diagnostics.
+
+## Current Config Sections
+
+Current typed schema in `src/config.zig` includes:
+- `config_version`
+- `[capabilities]`, `[capabilities.presets.<name>]`
+- `[orchestration]`, `[agents.<id>]`
+- `[observability]`
+- `[logging]`
+- `[gateway]`
+- `[security]`
+- `[providers.primary]`
+- `[providers.fixtures]`
+- `[providers.reliable]`
+- `[memory]`
+- `[tools]`
+- `[queue]`
+
+## Normalized Example
+
+Use `tests/golden/config_normalized.toml` as canonical normalized format.

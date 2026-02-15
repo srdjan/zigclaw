@@ -21,6 +21,7 @@ Notes:
 - Minimal HTTP/1.1 parser (request-line + headers + content-length).
 - One-request-per-connection (simple, predictable).
 - The gateway is intended for **localhost** usage; if you bind to 0.0.0.0 you should additionally firewall it.
+- Optional per-client rate limiting (`[gateway]`) returns `429 Too Many Requests` when exceeded.
 - Cancel behavior:
   - queued requests are moved to `canceled` immediately
   - processing requests return `state=processing` + `cancel_pending=true` and transition to `canceled` at cooperative worker checks

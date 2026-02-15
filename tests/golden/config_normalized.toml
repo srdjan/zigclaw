@@ -26,6 +26,11 @@ file = "decisions.jsonl"
 max_file_bytes = 1048576
 max_files = 5
 
+[gateway]
+rate_limit_enabled = false
+rate_limit_window_ms = 1000
+rate_limit_max_requests = 60
+
 [security]
 workspace_root = "."
 max_request_bytes = 262144

@@ -229,6 +229,15 @@ TOKEN="... printed ..."
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/tools
 ```
 
+Optional per-client gateway throttling:
+```toml
+[gateway]
+rate_limit_enabled = true
+rate_limit_window_ms = 1000
+rate_limit_max_requests = 60
+```
+When exceeded, the gateway returns `429 Too Many Requests`.
+
 Async queue flow via gateway:
 ```sh
 TOKEN="... printed ..."

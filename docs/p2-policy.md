@@ -17,6 +17,8 @@ Implemented:
   `memory.backend`, and `memory.recall`.
 - Gateway boundaries are now covered as decision categories:
   `gateway.auth` and `gateway.request_bytes`.
+- Per-client gateway throttling is enforced when enabled and logged as:
+  `gateway.throttle` (allow/deny).
 
 Next:
-- Add explicit per-client rate limiting with decision events for throttle allow/deny.
+- Add distributed/shared limiter storage for multi-process gateway deployments.

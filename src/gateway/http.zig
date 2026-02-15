@@ -89,13 +89,13 @@ pub fn parseFromRaw(a: std.mem.Allocator, raw: []u8) !RequestOwned {
         if (ln.len == 0) break;
         const colon = std.mem.indexOfScalar(u8, ln, ':') orelse continue;
         const name = std.mem.trim(u8, ln[0..colon], " \t");
-        const value = std.mem.trim(u8, ln[colon+1..], " \t");
+        const value = std.mem.trim(u8, ln[colon + 1 ..], " \t");
         try headers_list.append(.{ .name = name, .value = value });
     }
 
     const headers = try headers_list.toOwnedSlice();
     const cl = getContentLength(headers);
-    const body = raw[after .. @min(raw.len, after + cl)];
+    const body = raw[after..@min(raw.len, after + cl)];
 
     return .{
         .raw = raw,
@@ -177,6 +177,7 @@ fn reasonPhrase(code: u16) []const u8 {
         403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
+        429 => "Too Many Requests",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
         500 => "Internal Server Error",

@@ -8,6 +8,37 @@ const agent_loop = @import("../agent/loop.zig");
 const queue_worker = @import("../queue/worker.zig");
 const decision_log = @import("../decision_log.zig");
 
+const rate_bucket_count: usize = 128;
+const max_client_key_len: usize = 96;
+
+const ClientKey = struct {
+    buf: [max_client_key_len]u8 = [_]u8{0} ** max_client_key_len,
+    len: u8 = 0,
+
+    fn slice(self: *const ClientKey) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+const RateBucket = struct {
+    in_use: bool = false,
+    key_hash: u64 = 0,
+    key: [max_client_key_len]u8 = [_]u8{0} ** max_client_key_len,
+    key_len: u8 = 0,
+    window_start_ms: i64 = 0,
+    count: u32 = 0,
+    last_seen_ms: i64 = 0,
+};
+
+const RateResult = struct {
+    allowed: bool,
+    client_key: ClientKey,
+    window_count: u32,
+    limit: u32,
+};
+
+var rate_buckets: [rate_bucket_count]RateBucket = [_]RateBucket{.{}} ** rate_bucket_count;
+
 pub const Resp = struct {
     status: u16,
     body: []u8,
@@ -16,6 +47,10 @@ pub const Resp = struct {
         a.free(self.body);
     }
 };
+
+pub fn resetRateLimiterForTests() void {
+    rate_buckets = [_]RateBucket{.{}} ** rate_bucket_count;
+}
 
 pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.ValidatedConfig, req: http.RequestOwned, token: []const u8, request_id: []const u8) !Resp {
     const path, const query = splitTarget(req.target);
@@ -41,6 +76,27 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
             .policy_hash = cfg.policy.policyHash(),
         });
         return .{ .status = 200, .body = body };
+    }
+
+    const rate = checkRateLimit(req, cfg.raw.gateway, io);
+    if (cfg.raw.gateway.rate_limit_enabled) {
+        const throttle_reason = if (rate.allowed)
+            try std.fmt.allocPrint(a, "allowed: {d}/{d} requests in current window", .{ rate.window_count, rate.limit })
+        else
+            try std.fmt.allocPrint(a, "denied: {d}/{d} requests in current window", .{ rate.window_count, rate.limit });
+        defer a.free(throttle_reason);
+
+        decisions.log(a, .{
+            .ts_unix_ms = decision_log.nowUnixMs(io),
+            .request_id = request_id,
+            .prompt_hash = null,
+            .decision = "gateway.throttle",
+            .subject = rate.client_key.slice(),
+            .allowed = rate.allowed,
+            .reason = throttle_reason,
+            .policy_hash = cfg.policy.policyHash(),
+        });
+        if (!rate.allowed) return try jsonError(a, 429, request_id, "TooManyRequests");
     }
 
     const authed = isAuthorized(req, token);
@@ -177,6 +233,127 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
     }
 
     return try jsonError(a, 404, request_id, "not found");
+}
+
+fn checkRateLimit(req: http.RequestOwned, gcfg: config.GatewayConfig, io: std.Io) RateResult {
+    const key = clientKeyFromRequest(req);
+    if (!gcfg.rate_limit_enabled) {
+        return .{
+            .allowed = true,
+            .client_key = key,
+            .window_count = 0,
+            .limit = if (gcfg.rate_limit_max_requests == 0) 1 else gcfg.rate_limit_max_requests,
+        };
+    }
+
+    const now_ms = decision_log.nowUnixMs(io);
+    const window_ms: i64 = @intCast(if (gcfg.rate_limit_window_ms == 0) 1 else gcfg.rate_limit_window_ms);
+    const limit: u32 = if (gcfg.rate_limit_max_requests == 0) 1 else gcfg.rate_limit_max_requests;
+
+    const h = hashClientKey(key.slice());
+    const bucket = findOrInitBucket(key.slice(), h, now_ms, window_ms);
+
+    if (now_ms - bucket.window_start_ms >= window_ms) {
+        bucket.window_start_ms = now_ms;
+        bucket.count = 0;
+    }
+
+    var allowed = false;
+    if (bucket.count < limit) {
+        bucket.count += 1;
+        allowed = true;
+    }
+    bucket.last_seen_ms = now_ms;
+
+    return .{
+        .allowed = allowed,
+        .client_key = key,
+        .window_count = bucket.count,
+        .limit = limit,
+    };
+}
+
+fn hashClientKey(key: []const u8) u64 {
+    var h = std.hash.Wyhash.init(0x517cc1b727220a95);
+    h.update(key);
+    return h.final();
+}
+
+fn findOrInitBucket(key: []const u8, key_hash: u64, now_ms: i64, window_ms: i64) *RateBucket {
+    const start = @as(usize, @intCast(key_hash % rate_bucket_count));
+    const stale_after = window_ms * 4;
+    var candidate_idx: ?usize = null;
+
+    var i: usize = 0;
+    while (i < rate_bucket_count) : (i += 1) {
+        const idx = (start + i) % rate_bucket_count;
+        const b = &rate_buckets[idx];
+
+        if (b.in_use) {
+            if (b.key_hash == key_hash and bucketKeyEq(b.*, key)) return b;
+            if (candidate_idx == null and now_ms - b.last_seen_ms > stale_after) candidate_idx = idx;
+            continue;
+        }
+
+        if (candidate_idx == null) candidate_idx = idx;
+    }
+
+    const idx = candidate_idx orelse start;
+    var out = &rate_buckets[idx];
+    out.in_use = true;
+    out.key_hash = key_hash;
+    out.key_len = @intCast(key.len);
+    @memcpy(out.key[0..key.len], key);
+    out.window_start_ms = now_ms;
+    out.last_seen_ms = now_ms;
+    out.count = 0;
+    return out;
+}
+
+fn bucketKeyEq(b: RateBucket, key: []const u8) bool {
+    return b.key_len == key.len and std.mem.eql(u8, b.key[0..b.key_len], key);
+}
+
+fn clientKeyFromRequest(req: http.RequestOwned) ClientKey {
+    var out = ClientKey{};
+    const raw = rawClientId(req);
+
+    if (raw.len == 0) {
+        const s = "anon";
+        out.len = @intCast(s.len);
+        @memcpy(out.buf[0..s.len], s);
+        return out;
+    }
+
+    if (raw.len <= max_client_key_len) {
+        out.len = @intCast(raw.len);
+        @memcpy(out.buf[0..raw.len], raw);
+        return out;
+    }
+
+    const h = hashClientKey(raw);
+    const key = std.fmt.bufPrint(&out.buf, "h:{x}", .{h}) catch "anon";
+    out.len = @intCast(key.len);
+    return out;
+}
+
+fn rawClientId(req: http.RequestOwned) []const u8 {
+    if (req.header("authorization")) |auth| {
+        const prefix = "Bearer ";
+        if (std.mem.startsWith(u8, auth, prefix)) {
+            return std.mem.trim(u8, auth[prefix.len..], " \t\r\n");
+        }
+    }
+    if (req.header("x-client-id")) |cid| {
+        const t = std.mem.trim(u8, cid, " \t\r\n");
+        if (t.len > 0) return t;
+    }
+    if (req.header("x-forwarded-for")) |xff| {
+        const first = if (std.mem.indexOfScalar(u8, xff, ',')) |i| xff[0..i] else xff;
+        const t = std.mem.trim(u8, first, " \t\r\n");
+        if (t.len > 0) return t;
+    }
+    return "";
 }
 
 fn isAuthorized(req: http.RequestOwned, token: []const u8) bool {

@@ -37,6 +37,12 @@ pub const SecurityConfig = struct {
     max_request_bytes: usize = 262144,
 };
 
+pub const GatewayConfig = struct {
+    rate_limit_enabled: bool = false,
+    rate_limit_window_ms: u32 = 1000,
+    rate_limit_max_requests: u32 = 60,
+};
+
 pub const ObservabilityConfig = struct {
     enabled: bool = true,
     dir: []const u8 = "./.zigclaw/logs",
@@ -101,6 +107,7 @@ pub const Config = struct {
 
     memory: MemoryConfig = .{},
     security: SecurityConfig = .{},
+    gateway: GatewayConfig = .{},
     tools: ToolsConfig = .{},
     queue: QueueConfig = .{},
     capabilities: CapabilitiesConfig = .{},
@@ -125,51 +132,60 @@ pub const ValidatedConfig = struct {
 
     pub fn print(self: ValidatedConfig, w: *std.Io.Writer) !void {
         const sys = self.raw;
-        try w.print(
-            \\ValidatedConfig:
-            \\  config_version={d}
-            \\  provider.primary.kind={s} model={s} temperature={d} base_url={s} api_key_env={s}
-            \\  providers.fixtures.mode={s} dir={s}
-            \\  providers.reliable.retries={d} backoff_ms={d}
-            \\  memory.backend={s} root={s}
-            \\  security.workspace_root={s} max_request_bytes={d}
-            \\  tools.wasmtime_path={s} plugin_dir={s}
-            \\  queue.dir={s} poll_ms={d} max_retries={d} retry_backoff_ms={d} retry_jitter_pct={d}
-            \\  logging.enabled={s} dir={s} file={s} max_file_bytes={d} max_files={d}
-            \\  capabilities.active_preset={s}
-            \\  orchestration.leader_agent={s} agents={d}
-            \\  policy.tools_allowed={d} presets={d}
-            \\
-        , .{
-            sys.config_version,
+        try w.print("ValidatedConfig:\n", .{});
+        try w.print("  config_version={d}\n", .{sys.config_version});
+        try w.print("  provider.primary.kind={s} model={s} temperature={d} base_url={s} api_key_env={s}\n", .{
             @tagName(sys.provider_primary.kind),
             sys.provider_primary.model,
             sys.provider_primary.temperature,
             sys.provider_primary.base_url,
             sys.provider_primary.api_key_env,
+        });
+        try w.print("  providers.fixtures.mode={s} dir={s}\n", .{
             @tagName(sys.provider_fixtures.mode),
             sys.provider_fixtures.dir,
+        });
+        try w.print("  providers.reliable.retries={d} backoff_ms={d}\n", .{
             sys.provider_reliable.retries,
             sys.provider_reliable.backoff_ms,
+        });
+        try w.print("  memory.backend={s} root={s}\n", .{
             @tagName(sys.memory.backend),
             sys.memory.root,
+        });
+        try w.print("  security.workspace_root={s} max_request_bytes={d}\n", .{
             sys.security.workspace_root,
             sys.security.max_request_bytes,
+        });
+        try w.print("  gateway.rate_limit_enabled={s} rate_limit_window_ms={d} rate_limit_max_requests={d}\n", .{
+            if (sys.gateway.rate_limit_enabled) "true" else "false",
+            sys.gateway.rate_limit_window_ms,
+            sys.gateway.rate_limit_max_requests,
+        });
+        try w.print("  tools.wasmtime_path={s} plugin_dir={s}\n", .{
             sys.tools.wasmtime_path,
             sys.tools.plugin_dir,
+        });
+        try w.print("  queue.dir={s} poll_ms={d} max_retries={d} retry_backoff_ms={d} retry_jitter_pct={d}\n", .{
             sys.queue.dir,
             sys.queue.poll_ms,
             sys.queue.max_retries,
             sys.queue.retry_backoff_ms,
             sys.queue.retry_jitter_pct,
+        });
+        try w.print("  logging.enabled={s} dir={s} file={s} max_file_bytes={d} max_files={d}\n", .{
             if (sys.logging.enabled) "true" else "false",
             sys.logging.dir,
             sys.logging.file,
             sys.logging.max_file_bytes,
             sys.logging.max_files,
-            sys.capabilities.active_preset,
+        });
+        try w.print("  capabilities.active_preset={s}\n", .{sys.capabilities.active_preset});
+        try w.print("  orchestration.leader_agent={s} agents={d}\n", .{
             sys.orchestration.leader_agent,
             sys.orchestration.agents.len,
+        });
+        try w.print("  policy.tools_allowed={d} presets={d}\n", .{
             self.policy.allowed_tools_count(),
             self.policy.presets_count(),
         });
@@ -263,6 +279,12 @@ pub const ValidatedConfig = struct {
         try w.writeAll("\n");
         try w.print("max_file_bytes = {d}\n", .{self.raw.logging.max_file_bytes});
         try w.print("max_files = {d}\n\n", .{self.raw.logging.max_files});
+
+        // [gateway]
+        try w.writeAll("[gateway]\n");
+        try w.print("rate_limit_enabled = {s}\n", .{if (self.raw.gateway.rate_limit_enabled) "true" else "false"});
+        try w.print("rate_limit_window_ms = {d}\n", .{self.raw.gateway.rate_limit_window_ms});
+        try w.print("rate_limit_max_requests = {d}\n\n", .{self.raw.gateway.rate_limit_max_requests});
 
         // [security]
         try w.writeAll("[security]\n");
@@ -634,6 +656,18 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
             cfg.logging.max_files = try coerceU32(v);
             continue;
         }
+        if (std.mem.eql(u8, k, "gateway.rate_limit_enabled")) {
+            cfg.gateway.rate_limit_enabled = try coerceBool(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "gateway.rate_limit_window_ms")) {
+            cfg.gateway.rate_limit_window_ms = try coerceU32(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "gateway.rate_limit_max_requests")) {
+            cfg.gateway.rate_limit_max_requests = try coerceU32(v);
+            continue;
+        }
 
         if (std.mem.eql(u8, k, "security.workspace_root")) {
             cfg.security.workspace_root = try coerceStringDup(a, v);
@@ -782,6 +816,22 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
             .message = try std.fmt.allocPrint(a, "retry_jitter_pct={d} out of range; clamping to 100", .{cfg.queue.retry_jitter_pct}),
         });
         cfg.queue.retry_jitter_pct = 100;
+    }
+
+    if (cfg.gateway.rate_limit_window_ms == 0) {
+        try warns.append(.{
+            .key_path = try a.dupe(u8, "gateway.rate_limit_window_ms"),
+            .message = try std.fmt.allocPrint(a, "rate_limit_window_ms={d} invalid; clamping to 1", .{cfg.gateway.rate_limit_window_ms}),
+        });
+        cfg.gateway.rate_limit_window_ms = 1;
+    }
+
+    if (cfg.gateway.rate_limit_max_requests == 0) {
+        try warns.append(.{
+            .key_path = try a.dupe(u8, "gateway.rate_limit_max_requests"),
+            .message = try std.fmt.allocPrint(a, "rate_limit_max_requests={d} invalid; clamping to 1", .{cfg.gateway.rate_limit_max_requests}),
+        });
+        cfg.gateway.rate_limit_max_requests = 1;
     }
 
     // Build presets

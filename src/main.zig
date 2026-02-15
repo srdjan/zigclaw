@@ -387,6 +387,11 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\workspace_root = "."
         \\max_request_bytes = 262144
         \\
+        \\[gateway]
+        \\rate_limit_enabled = false
+        \\rate_limit_window_ms = 1000
+        \\rate_limit_max_requests = 60
+        \\
         \\[providers.primary]
         \\kind = "openai_compat"
         \\model = "gpt-4.1-mini"

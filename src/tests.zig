@@ -1352,6 +1352,86 @@ test "gateway decision log records auth and request size boundaries" {
     try std.testing.expect(saw_size_deny);
 }
 
+test "gateway rate limit throttles per client and logs allow/deny decisions" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const log_dir = "tests/.tmp_gateway_throttle";
+    std.Io.Dir.cwd().deleteTree(io, log_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, log_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.logging.enabled = true;
+    vcq.raw.logging.dir = log_dir;
+    vcq.raw.logging.file = "decisions.jsonl";
+    vcq.raw.logging.max_file_bytes = 1024 * 1024;
+    vcq.raw.logging.max_files = 2;
+    vcq.raw.gateway.rate_limit_enabled = true;
+    vcq.raw.gateway.rate_limit_window_ms = 60_000;
+    vcq.raw.gateway.rate_limit_max_requests = 2;
+
+    gw_routes.resetRateLimiterForTests();
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    const token = "tok_throttle";
+    var r1 = try makeGatewayRequest(a, "GET", "/v1/tools", token, "");
+    defer r1.deinit(a);
+    var p1 = try gw_routes.handle(a, io, &app, vcq, r1, token, "rid_thr_1");
+    defer p1.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), p1.status);
+
+    var r2 = try makeGatewayRequest(a, "GET", "/v1/tools", token, "");
+    defer r2.deinit(a);
+    var p2 = try gw_routes.handle(a, io, &app, vcq, r2, token, "rid_thr_2");
+    defer p2.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), p2.status);
+
+    var r3 = try makeGatewayRequest(a, "GET", "/v1/tools", token, "");
+    defer r3.deinit(a);
+    var p3 = try gw_routes.handle(a, io, &app, vcq, r3, token, "rid_thr_3");
+    defer p3.deinit(a);
+    try std.testing.expectEqual(@as(u16, 429), p3.status);
+
+    const log_path = try std.fs.path.join(a, &.{ log_dir, "decisions.jsonl" });
+    defer a.free(log_path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, log_path, a, std.Io.Limit.limited(1024 * 1024));
+    defer a.free(bytes);
+
+    var saw_allow = false;
+    var saw_deny = false;
+
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, line, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const obj = parsed.value.object;
+        const d = obj.get("decision") orelse return error.BadGolden;
+        if (d != .string) return error.BadGolden;
+        if (!std.mem.eql(u8, d.string, "gateway.throttle")) continue;
+        const allowed = obj.get("allowed") orelse return error.BadGolden;
+        if (allowed != .bool) return error.BadGolden;
+        if (allowed.bool) saw_allow = true else saw_deny = true;
+    }
+
+    try std.testing.expect(saw_allow);
+    try std.testing.expect(saw_deny);
+}
+
 test "ToolRunResult toJsonAlloc includes request_id" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

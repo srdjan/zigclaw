@@ -4,6 +4,7 @@ const config = @import("../config.zig");
 const http = @import("http.zig");
 const pairing = @import("../security/pairing.zig");
 const tools_rt = @import("../tools/manifest_runtime.zig");
+const agent_loop = @import("../agent/loop.zig");
 
 pub const Resp = struct {
     status: u16,
@@ -78,12 +79,12 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         if (msg_v != .string) return jsonError(a, 400, request_id, "'message' must be string");
         const msg = msg_v.string;
 
-        const content = runAgentOnce(a, io, cfg, msg, request_id) catch |e| {
+        var result = agent_loop.runLoop(a, io, cfg, msg, request_id) catch |e| {
             return jsonError(a, 500, request_id, @errorName(e));
         };
-        defer a.free(content);
+        defer result.deinit(a);
 
-        const body = try jsonObj(a, .{ .request_id = request_id, .content = content });
+        const body = try jsonObj(a, .{ .request_id = request_id, .content = result.content, .turns = result.turns });
         return .{ .status = 200, .body = body };
     }
 
@@ -119,60 +120,3 @@ fn jsonObj(a: std.mem.Allocator, payload: anytype) ![]u8 {
     return try aw.toOwnedSlice();
 }
 
-// Agent runner that returns response content
-fn runAgentOnce(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, message: []const u8, request_id: []const u8) ![]u8 {
-    const provider_factory = @import("../providers/factory.zig");
-    const bundle = @import("../agent/bundle.zig");
-    const obs_mod = @import("../obs/logger.zig");
-
-    var logger = obs_mod.Logger.fromConfig(cfg, io);
-
-    var provider = try provider_factory.build(a, cfg);
-    defer provider.deinit(a);
-
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const ta = arena.allocator();
-
-    var b = try bundle.build(ta, io, cfg, message);
-    defer b.deinit(ta);
-
-    logger.logJson(ta, .agent_run, request_id, .{
-        .prompt_hash = b.prompt_hash_hex,
-        .provider_kind = @tagName(cfg.raw.provider_primary.kind),
-        .model = cfg.raw.provider_primary.model,
-        .via = "gateway",
-    });
-
-    logger.logJson(ta, .provider_call, request_id, .{
-        .kind = @tagName(cfg.raw.provider_primary.kind),
-        .model = cfg.raw.provider_primary.model,
-        .status = "start",
-    });
-
-    const resp = provider.chat(ta, io, .{
-        .system = b.system,
-        .user = message,
-        .model = cfg.raw.provider_primary.model,
-        .temperature = cfg.raw.provider_primary.temperature,
-        .memory_context = b.memory,
-        .meta = .{ .request_id = request_id, .prompt_hash = b.prompt_hash_hex },
-    }) catch |e| {
-        logger.logJson(ta, .provider_call, request_id, .{
-            .kind = @tagName(cfg.raw.provider_primary.kind),
-            .model = cfg.raw.provider_primary.model,
-            .status = "error",
-            .error_name = @errorName(e),
-        });
-        return e;
-    };
-
-    logger.logJson(ta, .provider_call, request_id, .{
-        .kind = @tagName(cfg.raw.provider_primary.kind),
-        .model = cfg.raw.provider_primary.model,
-        .status = "ok",
-        .bytes_out = resp.content.len,
-    });
-
-    return try a.dupe(u8, resp.content);
-}

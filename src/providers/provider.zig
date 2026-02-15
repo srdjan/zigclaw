@@ -41,17 +41,53 @@ pub const RequestMeta = struct {
     prompt_hash: ?[]const u8 = null,
 };
 
+// --- Message types for multi-turn conversations ---
+
+pub const Role = enum { system, user, assistant, tool };
+
+pub const ToolCall = struct {
+    id: []const u8,
+    name: []const u8,
+    arguments: []const u8, // JSON string of tool arguments
+};
+
+pub const ToolDef = struct {
+    name: []const u8,
+    description: []const u8,
+    parameters_json: []const u8, // JSON schema string for args
+};
+
+pub const Message = struct {
+    role: Role,
+    content: ?[]const u8 = null,
+    tool_calls: []const ToolCall = &.{}, // present on assistant messages requesting tool use
+    tool_call_id: ?[]const u8 = null, // present on tool result messages
+};
+
+pub const FinishReason = enum { stop, tool_calls, length, unknown };
+
+// --- Request / Response ---
+
 pub const ChatRequest = struct {
-    system: ?[]const u8,
-    user: []const u8,
+    // Multi-turn: if messages is non-empty, provider uses it directly.
+    // Otherwise, provider constructs messages from system/user/memory_context (legacy path).
+    messages: []const Message = &.{},
+    tools: []const ToolDef = &.{},
+
+    // Legacy single-turn fields (used when messages is empty)
+    system: ?[]const u8 = null,
+    user: []const u8 = "",
+    memory_context: []const MemoryItem = &.{},
+
     model: []const u8,
     temperature: f64,
-    memory_context: []const MemoryItem,
     meta: RequestMeta = .{},
 };
 
 pub const ChatResponse = struct {
-    content: []u8,
+    content: []u8, // empty string when only tool_calls are present
+    tool_calls: []ToolCall = &.{}, // non-empty when finish_reason is .tool_calls
+    finish_reason: FinishReason = .stop,
 };
 
 // For fixtures writing without owning new allocations

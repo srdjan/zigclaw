@@ -21,13 +21,10 @@ pub const OpenAiCompatProvider = struct {
     }
 
     pub fn chat(self: OpenAiCompatProvider, a: std.mem.Allocator, io: std.Io, req: provider.ChatRequest) !provider.ChatResponse {
-        const sys = try buildSystemMessage(a, req.system, req.memory_context);
-        defer a.free(sys);
-
         const url = try std.fmt.allocPrint(a, "{s}/chat/completions", .{std.mem.trimEnd(u8, self.base_url, "/")});
         defer a.free(url);
 
-        const body = try buildRequestBody(a, req.model, req.temperature, sys, req.user);
+        const body = try buildRequestBody(a, req);
         defer a.free(body);
 
         // Resolve API key: prefer inline, fall back to env var
@@ -82,10 +79,124 @@ pub const OpenAiCompatProvider = struct {
             return error.ProviderHttpError;
         }
 
-        const content = try parseChatCompletionContentAlloc(a, resp_bytes);
-        return .{ .content = content };
+        return try parseChatCompletion(a, resp_bytes);
     }
 };
+
+fn buildRequestBody(a: std.mem.Allocator, req: provider.ChatRequest) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+
+    try stream.beginObject();
+    try stream.objectField("model");
+    try stream.write(req.model);
+    try stream.objectField("temperature");
+    try stream.write(req.temperature);
+
+    try stream.objectField("messages");
+    try stream.beginArray();
+
+    if (req.messages.len > 0) {
+        // Multi-turn path: use messages directly
+        for (req.messages) |msg| {
+            try writeMessage(&stream, &aw.writer, msg);
+        }
+    } else {
+        // Legacy single-turn path: build from system/user/memory_context
+        const sys = try buildSystemMessage(a, req.system, req.memory_context);
+        defer a.free(sys);
+
+        try stream.beginObject();
+        try stream.objectField("role");
+        try stream.write("system");
+        try stream.objectField("content");
+        try stream.write(sys);
+        try stream.endObject();
+
+        try stream.beginObject();
+        try stream.objectField("role");
+        try stream.write("user");
+        try stream.objectField("content");
+        try stream.write(req.user);
+        try stream.endObject();
+    }
+    try stream.endArray();
+
+    // Tool definitions
+    if (req.tools.len > 0) {
+        try stream.objectField("tools");
+        try stream.beginArray();
+        for (req.tools) |tool| {
+            try stream.beginObject();
+            try stream.objectField("type");
+            try stream.write("function");
+            try stream.objectField("function");
+            try stream.beginObject();
+            try stream.objectField("name");
+            try stream.write(tool.name);
+            try stream.objectField("description");
+            try stream.write(tool.description);
+            try stream.objectField("parameters");
+            // parameters_json is already a JSON string; write raw
+            try aw.writer.writeAll(tool.parameters_json);
+            try stream.endObject(); // function
+            try stream.endObject(); // tool
+        }
+        try stream.endArray();
+    }
+
+    try stream.objectField("stream");
+    try stream.write(false);
+    try stream.endObject();
+
+    return try aw.toOwnedSlice();
+}
+
+fn writeMessage(stream: anytype, raw_writer: anytype, msg: provider.Message) !void {
+    try stream.beginObject();
+    try stream.objectField("role");
+    try stream.write(@tagName(msg.role));
+
+    if (msg.content) |c| {
+        try stream.objectField("content");
+        try stream.write(c);
+    } else {
+        try stream.objectField("content");
+        // Write raw "null" to avoid string quoting
+        try raw_writer.writeAll("null");
+    }
+
+    // Assistant messages with tool calls
+    if (msg.tool_calls.len > 0) {
+        try stream.objectField("tool_calls");
+        try stream.beginArray();
+        for (msg.tool_calls) |tc| {
+            try stream.beginObject();
+            try stream.objectField("id");
+            try stream.write(tc.id);
+            try stream.objectField("type");
+            try stream.write("function");
+            try stream.objectField("function");
+            try stream.beginObject();
+            try stream.objectField("name");
+            try stream.write(tc.name);
+            try stream.objectField("arguments");
+            try stream.write(tc.arguments);
+            try stream.endObject(); // function
+            try stream.endObject(); // tool call
+        }
+        try stream.endArray();
+    }
+
+    // Tool result messages
+    if (msg.tool_call_id) |id| {
+        try stream.objectField("tool_call_id");
+        try stream.write(id);
+    }
+
+    try stream.endObject();
+}
 
 fn buildSystemMessage(a: std.mem.Allocator, system: ?[]const u8, memory: []const provider.MemoryItem) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(a);
@@ -104,46 +215,7 @@ fn buildSystemMessage(a: std.mem.Allocator, system: ?[]const u8, memory: []const
     return try aw.toOwnedSlice();
 }
 
-fn buildRequestBody(a: std.mem.Allocator, model: []const u8, temp: f64, system: []const u8, user: []const u8) ![]u8 {
-    var aw: std.Io.Writer.Allocating = .init(a);
-    defer aw.deinit();
-
-    var stream: std.json.Stringify = .{ .writer = &aw.writer };
-
-    try stream.beginObject();
-    try stream.objectField("model");
-    try stream.write(model);
-    try stream.objectField("temperature");
-    try stream.write(temp);
-
-    try stream.objectField("messages");
-    try stream.beginArray();
-    // system
-    try stream.beginObject();
-    try stream.objectField("role");
-    try stream.write("system");
-    try stream.objectField("content");
-    try stream.write(system);
-    try stream.endObject();
-
-    // user
-    try stream.beginObject();
-    try stream.objectField("role");
-    try stream.write("user");
-    try stream.objectField("content");
-    try stream.write(user);
-    try stream.endObject();
-
-    try stream.endArray();
-
-    try stream.objectField("stream");
-    try stream.write(false);
-    try stream.endObject();
-
-    return try aw.toOwnedSlice();
-}
-
-fn parseChatCompletionContentAlloc(a: std.mem.Allocator, bytes: []const u8) ![]u8 {
+fn parseChatCompletion(a: std.mem.Allocator, bytes: []const u8) !provider.ChatResponse {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const ta = arena.allocator();
@@ -151,13 +223,64 @@ fn parseChatCompletionContentAlloc(a: std.mem.Allocator, bytes: []const u8) ![]u
     const parsed = std.json.parseFromSlice(std.json.Value, ta, bytes, .{}) catch return error.InvalidJson;
     const root = parsed.value;
 
-    // choices[0].message.content
     const choices = root.object.get("choices") orelse return error.InvalidResponse;
     if (choices != .array or choices.array.items.len == 0) return error.InvalidResponse;
     const first = choices.array.items[0];
-    const msg = first.object.get("message") orelse return error.InvalidResponse;
-    const content_v = msg.object.get("content") orelse return error.InvalidResponse;
-    if (content_v != .string) return error.InvalidResponse;
 
-    return try a.dupe(u8, content_v.string);
+    // Parse finish_reason
+    const finish_reason: provider.FinishReason = blk: {
+        const fr = first.object.get("finish_reason") orelse break :blk .unknown;
+        if (fr != .string) break :blk .unknown;
+        if (std.mem.eql(u8, fr.string, "stop")) break :blk .stop;
+        if (std.mem.eql(u8, fr.string, "tool_calls")) break :blk .tool_calls;
+        if (std.mem.eql(u8, fr.string, "length")) break :blk .length;
+        break :blk .unknown;
+    };
+
+    const msg = first.object.get("message") orelse return error.InvalidResponse;
+
+    // Parse content (may be null when tool_calls are present)
+    const content: []u8 = blk: {
+        const content_v = msg.object.get("content") orelse break :blk try a.dupe(u8, "");
+        if (content_v == .string) break :blk try a.dupe(u8, content_v.string);
+        break :blk try a.dupe(u8, "");
+    };
+
+    // Parse tool_calls
+    var tool_calls: []provider.ToolCall = &.{};
+    if (msg.object.get("tool_calls")) |tc_val| {
+        if (tc_val == .array and tc_val.array.items.len > 0) {
+            var tcs = std.array_list.Managed(provider.ToolCall).init(a);
+            for (tc_val.array.items) |tc_item| {
+                if (tc_item != .object) continue;
+                const id = if (tc_item.object.get("id")) |v| switch (v) {
+                    .string => |s| s,
+                    else => "",
+                } else "";
+                const func = tc_item.object.get("function") orelse continue;
+                if (func != .object) continue;
+                const name = if (func.object.get("name")) |v| switch (v) {
+                    .string => |s| s,
+                    else => continue,
+                } else continue;
+                const arguments = if (func.object.get("arguments")) |v| switch (v) {
+                    .string => |s| s,
+                    else => "{}",
+                } else "{}";
+
+                try tcs.append(.{
+                    .id = try a.dupe(u8, id),
+                    .name = try a.dupe(u8, name),
+                    .arguments = try a.dupe(u8, arguments),
+                });
+            }
+            tool_calls = try tcs.toOwnedSlice();
+        }
+    }
+
+    return .{
+        .content = content,
+        .tool_calls = tool_calls,
+        .finish_reason = finish_reason,
+    };
 }

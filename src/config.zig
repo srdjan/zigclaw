@@ -62,6 +62,18 @@ pub const PresetConfig = struct {
     allow_write_paths: []const []const u8,
 };
 
+pub const AgentProfileConfig = struct {
+    id: []const u8,
+    capability_preset: []const u8,
+    delegate_to: []const []const u8,
+    system_prompt: []const u8,
+};
+
+pub const OrchestrationConfig = struct {
+    leader_agent: []const u8 = "",
+    agents: []AgentProfileConfig = &.{},
+};
+
 pub const Config = struct {
     config_version: u32 = 1,
 
@@ -75,6 +87,7 @@ pub const Config = struct {
     security: SecurityConfig = .{},
     tools: ToolsConfig = .{},
     capabilities: CapabilitiesConfig = .{},
+    orchestration: OrchestrationConfig = .{},
 };
 
 pub const Warning = struct {
@@ -105,6 +118,7 @@ pub const ValidatedConfig = struct {
             \\  security.workspace_root={s} max_request_bytes={d}
             \\  tools.wasmtime_path={s} plugin_dir={s}
             \\  capabilities.active_preset={s}
+            \\  orchestration.leader_agent={s} agents={d}
             \\  policy.tools_allowed={d} presets={d}
             \\
         , .{
@@ -125,6 +139,8 @@ pub const ValidatedConfig = struct {
             sys.tools.wasmtime_path,
             sys.tools.plugin_dir,
             sys.capabilities.active_preset,
+            sys.orchestration.leader_agent,
+            sys.orchestration.agents.len,
             self.policy.allowed_tools_count(),
             self.policy.presets_count(),
         });
@@ -161,6 +177,41 @@ pub const ValidatedConfig = struct {
             try w.writeAll("allow_write_paths = ");
             try writeTomlStringArray(w, p.allow_write_paths);
             try w.writeAll("\n\n");
+        }
+
+        // [orchestration] and [agents.<id>] are printed only when configured.
+        if (self.raw.orchestration.leader_agent.len > 0 or self.raw.orchestration.agents.len > 0) {
+            try w.writeAll("[orchestration]\n");
+            try w.writeAll("leader_agent = ");
+            try writeTomlString(w, self.raw.orchestration.leader_agent);
+            try w.writeAll("\n\n");
+
+            const agents = self.raw.orchestration.agents;
+            const agent_idxs = try a.alloc(usize, agents.len);
+            defer a.free(agent_idxs);
+            for (agent_idxs, 0..) |*p, i| p.* = i;
+            std.sort.block(usize, agent_idxs, agents, struct {
+                fn lessThan(agents_: []AgentProfileConfig, ai: usize, bi: usize) bool {
+                    return std.mem.lessThan(u8, agents_[ai].id, agents_[bi].id);
+                }
+            }.lessThan);
+
+            for (agent_idxs) |i| {
+                const ag = agents[i];
+                try w.print("[agents.{s}]\n", .{ag.id});
+                try w.writeAll("capability_preset = ");
+                try writeTomlString(w, ag.capability_preset);
+                try w.writeAll("\n");
+                try w.writeAll("delegate_to = ");
+                try writeTomlStringArray(w, ag.delegate_to);
+                try w.writeAll("\n");
+                if (ag.system_prompt.len > 0) {
+                    try w.writeAll("system_prompt = ");
+                    try writeTomlString(w, ag.system_prompt);
+                    try w.writeAll("\n");
+                }
+                try w.writeAll("\n");
+            }
         }
 
 
@@ -471,6 +522,9 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
     var preset_names = std.StringHashMap(void).init(a);
     defer preset_names.deinit();
 
+    var agent_names = std.StringHashMap(void).init(a);
+    defer agent_names.deinit();
+
     var it = parsed.keys.map.iterator();
     while (it.next()) |e| {
         const k = e.key_ptr.*;
@@ -483,6 +537,11 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
 
         if (std.mem.eql(u8, k, "capabilities.active_preset")) {
             cfg.capabilities.active_preset = try coerceStringDup(a, v);
+            continue;
+        }
+
+        if (std.mem.eql(u8, k, "orchestration.leader_agent")) {
+            cfg.orchestration.leader_agent = try coerceStringDup(a, v);
             continue;
         }
 
@@ -605,6 +664,25 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
             continue;
         }
 
+        if (std.mem.startsWith(u8, k, "agents.")) {
+            const rest = k["agents.".len..];
+            const dot = std.mem.indexOfScalar(u8, rest, '.') orelse {
+                try unknownKeyWarn(a, &warns, k);
+                continue;
+            };
+            const id = rest[0..dot];
+            const field = rest[dot + 1 ..];
+            if (std.mem.eql(u8, field, "capability_preset") or
+                std.mem.eql(u8, field, "delegate_to") or
+                std.mem.eql(u8, field, "system_prompt"))
+            {
+                _ = try agent_names.put(id, {});
+                continue;
+            }
+            try unknownKeyWarn(a, &warns, k);
+            continue;
+        }
+
         try unknownKeyWarn(a, &warns, k);
     }
 
@@ -663,6 +741,95 @@ if (std.mem.eql(u8, k, "observability.max_files")) {
     }
 
     cfg.capabilities.presets = try presets.toOwnedSlice();
+
+    // Build static agent profiles for multi-agent orchestration.
+    var agent_ids = std.array_list.Managed([]const u8).init(a);
+    defer agent_ids.deinit();
+    {
+        var ita = agent_names.keyIterator();
+        while (ita.next()) |kp| try agent_ids.append(kp.*);
+    }
+    std.sort.block([]const u8, agent_ids.items, {}, struct {
+        fn lt(_: void, a_: []const u8, b_: []const u8) bool { return std.mem.lessThan(u8, a_, b_); }
+    }.lt);
+
+    var agents = std.array_list.Managed(AgentProfileConfig).init(a);
+    errdefer {
+        for (agents.items) |ag| freeAgentProfile(a, ag);
+        agents.deinit();
+    }
+
+    for (agent_ids.items) |id| {
+        const preset_key = try std.fmt.allocPrint(a, "agents.{s}.capability_preset", .{id});
+        defer a.free(preset_key);
+        const delegate_to_key = try std.fmt.allocPrint(a, "agents.{s}.delegate_to", .{id});
+        defer a.free(delegate_to_key);
+        const prompt_key = try std.fmt.allocPrint(a, "agents.{s}.system_prompt", .{id});
+        defer a.free(prompt_key);
+
+        const preset_v = parsed.keys.map.get(preset_key);
+        const delegate_v = parsed.keys.map.get(delegate_to_key);
+        const prompt_v = parsed.keys.map.get(prompt_key);
+
+        const capability_preset = if (preset_v) |pv| try coerceStringDup(a, pv) else try a.dupe(u8, cfg.capabilities.active_preset);
+        const delegate_to = if (delegate_v) |dv| try coerceStringArrayDup(a, dv) else try dupeStrs(a, &.{});
+        const system_prompt = if (prompt_v) |sv| try coerceStringDup(a, sv) else try a.dupe(u8, "");
+
+        try agents.append(.{
+            .id = try a.dupe(u8, id),
+            .capability_preset = capability_preset,
+            .delegate_to = delegate_to,
+            .system_prompt = system_prompt,
+        });
+    }
+
+    cfg.orchestration.agents = try agents.toOwnedSlice();
+
+    if (cfg.orchestration.agents.len > 0 and cfg.orchestration.leader_agent.len == 0) {
+        cfg.orchestration.leader_agent = try a.dupe(u8, cfg.orchestration.agents[0].id);
+    }
+
+    if (cfg.orchestration.agents.len > 0 and cfg.orchestration.leader_agent.len > 0) {
+        var found = false;
+        for (cfg.orchestration.agents) |ag| {
+            if (std.mem.eql(u8, ag.id, cfg.orchestration.leader_agent)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            try warns.append(.{
+                .key_path = try a.dupe(u8, "orchestration.leader_agent"),
+                .message = try std.fmt.allocPrint(
+                    a,
+                    "leader '{s}' not found in [agents.*]; using '{s}'",
+                    .{ cfg.orchestration.leader_agent, cfg.orchestration.agents[0].id },
+                ),
+            });
+            a.free(cfg.orchestration.leader_agent);
+            cfg.orchestration.leader_agent = try a.dupe(u8, cfg.orchestration.agents[0].id);
+        }
+    }
+
+    if (cfg.orchestration.agents.len > 0) {
+        for (cfg.orchestration.agents) |ag| {
+            for (ag.delegate_to) |target| {
+                var found = false;
+                for (cfg.orchestration.agents) |candidate| {
+                    if (std.mem.eql(u8, candidate.id, target)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    try warns.append(.{
+                        .key_path = try std.fmt.allocPrint(a, "agents.{s}.delegate_to", .{ag.id}),
+                        .message = try std.fmt.allocPrint(a, "unknown delegate target '{s}'", .{target}),
+                    });
+                }
+            }
+        }
+    }
 
     return .{ .cfg = cfg, .warnings = try warns.toOwnedSlice() };
 }
@@ -756,6 +923,7 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
         .{ &cfg.provider_primary.api_key_env, &d.provider_primary.api_key_env },
         .{ &cfg.provider_fixtures.dir, &d.provider_fixtures.dir },
         .{ &cfg.memory.root, &d.memory.root },
+        .{ &cfg.orchestration.leader_agent, &d.orchestration.leader_agent },
     }) |pair| {
         if (pair[0].*.ptr != pair[1].*.ptr) a.free(pair[0].*);
     }
@@ -765,6 +933,11 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
         for (cfg.capabilities.presets) |p| freePreset(a, p);
         a.free(cfg.capabilities.presets);
     }
+
+    if (cfg.orchestration.agents.ptr != d.orchestration.agents.ptr) {
+        for (cfg.orchestration.agents) |ag| freeAgentProfile(a, ag);
+        a.free(cfg.orchestration.agents);
+    }
 }
 
 fn freePreset(a: std.mem.Allocator, p: PresetConfig) void {
@@ -773,6 +946,14 @@ fn freePreset(a: std.mem.Allocator, p: PresetConfig) void {
     a.free(p.tools);
     for (p.allow_write_paths) |s| a.free(s);
     a.free(p.allow_write_paths);
+}
+
+fn freeAgentProfile(a: std.mem.Allocator, ag: AgentProfileConfig) void {
+    a.free(ag.id);
+    a.free(ag.capability_preset);
+    for (ag.delegate_to) |s| a.free(s);
+    a.free(ag.delegate_to);
+    a.free(ag.system_prompt);
 }
 
 fn freeWarnings(a: std.mem.Allocator, warnings: []Warning) void {

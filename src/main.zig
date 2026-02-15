@@ -58,11 +58,16 @@ pub fn main(init: std.process.Init) !void {
         const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
         const verbose = hasFlag(argv, "--verbose");
         const interactive = hasFlag(argv, "--interactive");
+        const agent_id = flagValue(argv, "--agent");
 
         var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
 
-        try app.runAgent(validated, msg, .{ .verbose = verbose, .interactive = interactive });
+        try app.runAgent(validated, msg, .{
+            .verbose = verbose,
+            .interactive = interactive,
+            .agent_id = agent_id,
+        });
         return;
     }
 
@@ -276,6 +281,20 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\allow_network = true
         \\allow_write_paths = ["./.zigclaw", "./tmp"]
         \\
+        \\# Optional static multi-agent orchestration
+        \\# [orchestration]
+        \\# leader_agent = "planner"
+        \\
+        \\# [agents.planner]
+        \\# capability_preset = "readonly"
+        \\# delegate_to = ["writer"]
+        \\# system_prompt = "Break work into steps and delegate."
+        \\
+        \\# [agents.writer]
+        \\# capability_preset = "dev"
+        \\# delegate_to = []
+        \\# system_prompt = "Implement delegated tasks."
+        \\
         \\[security]
         \\workspace_root = "."
         \\max_request_bytes = 262144
@@ -339,7 +358,7 @@ fn usage(io: std.Io) !void {
         \\
         \\Usage:
         \\  zigclaw init
-        \\  zigclaw agent --message "..." [--verbose] [--interactive] [--config zigclaw.toml]
+        \\  zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml]
         \\  zigclaw prompt dump --message "..." [--format json|text] [--out path] [--config zigclaw.toml]
         \\  zigclaw prompt diff --a file --b file
         \\  zigclaw tools list [--config zigclaw.toml]

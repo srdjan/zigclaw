@@ -169,6 +169,41 @@ test "policy explain outputs stable JSON (except hash)" {
     try std.testing.expectEqualStrings(expected, out);
 }
 
+test "config parses static multi-agent orchestration" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "tests/fixtures/multi_agent.toml");
+    defer vc.deinit(a);
+
+    try std.testing.expectEqualStrings("planner", vc.raw.orchestration.leader_agent);
+    try std.testing.expectEqual(@as(usize, 2), vc.raw.orchestration.agents.len);
+
+    var planner_ok = false;
+    var writer_ok = false;
+    for (vc.raw.orchestration.agents) |ag| {
+        if (std.mem.eql(u8, ag.id, "planner")) {
+            planner_ok = true;
+            try std.testing.expectEqualStrings("readonly", ag.capability_preset);
+            try std.testing.expectEqual(@as(usize, 1), ag.delegate_to.len);
+            try std.testing.expectEqualStrings("writer", ag.delegate_to[0]);
+            try std.testing.expect(std.mem.indexOf(u8, ag.system_prompt, "delegate") != null);
+        } else if (std.mem.eql(u8, ag.id, "writer")) {
+            writer_ok = true;
+            try std.testing.expectEqualStrings("dev", ag.capability_preset);
+            try std.testing.expectEqual(@as(usize, 0), ag.delegate_to.len);
+            try std.testing.expect(std.mem.indexOf(u8, ag.system_prompt, "delegated") != null);
+        }
+    }
+    try std.testing.expect(planner_ok);
+    try std.testing.expect(writer_ok);
+}
+
 const tool_manifest = @import("tools/manifest.zig");
 const tool_schema = @import("tools/schema.zig");
 

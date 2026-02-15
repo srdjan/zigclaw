@@ -23,6 +23,11 @@ Run agent (stub provider response for now):
 zig build run -- agent --message "hello"
 ```
 
+Run as a specific configured agent profile:
+```sh
+zig build run -- agent --message "review this change" --agent planner
+```
+
 Build WASI plugins (WASM + manifest):
 ```sh
 zig build plugins
@@ -46,6 +51,29 @@ zig-out/bin/zigclaw config validate --config zigclaw.toml --format toml
 ```
 
 Example config is included at `zigclaw.toml`.
+
+### Static Multi-Agent Profiles (minimal)
+
+```toml
+[orchestration]
+leader_agent = "planner"
+
+[agents.planner]
+capability_preset = "readonly"
+delegate_to = ["writer"]
+system_prompt = "Break work down, then delegate."
+
+[agents.writer]
+capability_preset = "dev"
+delegate_to = []
+system_prompt = "Implement delegated tasks precisely."
+```
+
+Notes:
+- `zigclaw agent` defaults to `orchestration.leader_agent` when profiles are configured.
+- Use `--agent <id>` to run a specific profile.
+- Delegation is explicit through the built-in `delegate_agent` tool.
+- Each profile enforces its own `capability_preset`.
 
 ## Layout
 - `src/` native zigclaw core

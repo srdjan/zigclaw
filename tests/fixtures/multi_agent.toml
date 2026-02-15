@@ -1,0 +1,27 @@
+config_version = 1
+
+[capabilities]
+active_preset = "readonly"
+
+[capabilities.presets.readonly]
+tools = ["echo"]
+allow_network = false
+allow_write_paths = []
+
+[capabilities.presets.dev]
+tools = ["echo", "fs_read"]
+allow_network = true
+allow_write_paths = ["./tmp"]
+
+[orchestration]
+leader_agent = "planner"
+
+[agents.planner]
+capability_preset = "readonly"
+delegate_to = ["writer"]
+system_prompt = "Plan the work, then delegate."
+
+[agents.writer]
+capability_preset = "dev"
+delegate_to = []
+system_prompt = "Implement delegated tasks."

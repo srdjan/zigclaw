@@ -20,8 +20,8 @@ pub const App = struct {
         return try config_mod.loadAndValidate(self.allocator, self.io, path);
     }
 
-    pub fn runAgent(self: *App, cfg: config_mod.ValidatedConfig, message: []const u8) !void {
-        try agent_loop.run(self.allocator, self.io, cfg, message);
+    pub fn runAgent(self: *App, cfg: config_mod.ValidatedConfig, message: []const u8, opts: agent_loop.RunOptions) !void {
+        try agent_loop.run(self.allocator, self.io, cfg, message, opts);
     }
 
     pub fn runTool(

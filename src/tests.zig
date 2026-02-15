@@ -623,3 +623,113 @@ test "diff empty inputs" {
     defer a.free(d);
     try std.testing.expectEqualStrings(" \n", d);
 }
+
+// ---- providers/openai_compat.zig parser tests ----
+
+const openai_parser = @import("providers/openai_compat.zig");
+
+test "parseChatCompletion extracts content and finish_reason" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const json =
+        \\{"choices":[{"message":{"content":"hello world","role":"assistant"},"finish_reason":"stop"}]}
+    ;
+    var resp = try openai_parser.parseChatCompletion(a, json);
+    defer a.free(resp.content);
+
+    try std.testing.expectEqualStrings("hello world", resp.content);
+    try std.testing.expectEqual(providers.FinishReason.stop, resp.finish_reason);
+    try std.testing.expectEqual(@as(usize, 0), resp.tool_calls.len);
+}
+
+test "parseChatCompletion parses tool_calls" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const json =
+        \\{"choices":[{"message":{"content":null,"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"fs_read","arguments":"{\"path\":\"README.md\"}"}}]},"finish_reason":"tool_calls"}]}
+    ;
+    var resp = try openai_parser.parseChatCompletion(a, json);
+    defer {
+        for (resp.tool_calls) |tc| {
+            a.free(tc.id);
+            a.free(tc.name);
+            a.free(tc.arguments);
+        }
+        a.free(resp.tool_calls);
+        a.free(resp.content);
+    }
+
+    try std.testing.expectEqual(providers.FinishReason.tool_calls, resp.finish_reason);
+    try std.testing.expectEqual(@as(usize, 1), resp.tool_calls.len);
+    try std.testing.expectEqualStrings("call_1", resp.tool_calls[0].id);
+    try std.testing.expectEqualStrings("fs_read", resp.tool_calls[0].name);
+    try std.testing.expectEqualStrings("{\"path\":\"README.md\"}", resp.tool_calls[0].arguments);
+    // content should be empty string when null in JSON
+    try std.testing.expectEqualStrings("", resp.content);
+}
+
+test "parseChatCompletion extracts usage tokens" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const json =
+        \\{"choices":[{"message":{"content":"ok","role":"assistant"},"finish_reason":"stop"}],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}
+    ;
+    var resp = try openai_parser.parseChatCompletion(a, json);
+    defer a.free(resp.content);
+
+    try std.testing.expectEqual(@as(u64, 42), resp.usage.prompt_tokens);
+    try std.testing.expectEqual(@as(u64, 7), resp.usage.completion_tokens);
+    try std.testing.expectEqual(@as(u64, 49), resp.usage.total_tokens);
+}
+
+test "parseChatCompletion defaults usage to zero when absent" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const json =
+        \\{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}
+    ;
+    var resp = try openai_parser.parseChatCompletion(a, json);
+    defer a.free(resp.content);
+
+    try std.testing.expectEqual(@as(u64, 0), resp.usage.prompt_tokens);
+    try std.testing.expectEqual(@as(u64, 0), resp.usage.completion_tokens);
+    try std.testing.expectEqual(@as(u64, 0), resp.usage.total_tokens);
+}
+
+test "parseChatCompletion rejects invalid JSON" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    try std.testing.expectError(error.InvalidJson, openai_parser.parseChatCompletion(a, "not json"));
+}
+
+test "parseChatCompletion rejects missing choices" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    try std.testing.expectError(error.InvalidResponse, openai_parser.parseChatCompletion(a, "{}"));
+}
+
+test "parseChatCompletion handles length finish_reason" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const json =
+        \\{"choices":[{"message":{"content":"truncated..."},"finish_reason":"length"}]}
+    ;
+    var resp = try openai_parser.parseChatCompletion(a, json);
+    defer a.free(resp.content);
+
+    try std.testing.expectEqual(providers.FinishReason.length, resp.finish_reason);
+}

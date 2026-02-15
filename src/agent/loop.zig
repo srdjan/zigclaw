@@ -10,6 +10,11 @@ const manifest_mod = @import("../tools/manifest.zig");
 
 const max_agent_turns: usize = 10;
 
+pub const RunOptions = struct {
+    verbose: bool = false,
+    interactive: bool = false,
+};
+
 pub const AgentResult = struct {
     content: []u8,
     turns: usize,
@@ -20,16 +25,65 @@ pub const AgentResult = struct {
 };
 
 /// CLI entry point: runs the agent loop and prints the result to stdout.
-pub fn run(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, message: []const u8) !void {
+pub fn run(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, message: []const u8, opts: RunOptions) !void {
+    if (opts.interactive) {
+        return runInteractive(a, io, cfg, opts);
+    }
+
     const rid = trace.newRequestId(io);
 
-    var result = try runLoop(a, io, cfg, message, rid.slice());
+    var result = try runLoop(a, io, cfg, message, rid.slice(), opts);
     defer result.deinit(a);
 
     var obuf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
     try ow.interface.print("request_id={s}\nturns={d}\n{s}\n", .{ rid.slice(), result.turns, result.content });
     try ow.flush();
+}
+
+/// Interactive REPL mode: reads lines from stdin, runs the agent loop for each.
+fn runInteractive(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, opts: RunOptions) !void {
+    var obuf: [4096]u8 = undefined;
+    var ow = std.Io.File.stdout().writer(io, &obuf);
+    try ow.interface.writeAll("zigclaw interactive mode. Type a message, or 'quit' to exit.\n");
+    try ow.flush();
+
+    const stdin = std.Io.File.stdin();
+    var rbuf: [4096]u8 = undefined;
+    var reader = stdin.reader(io, &rbuf);
+
+    while (true) {
+        try ow.interface.writeAll("> ");
+        try ow.flush();
+
+        const line = reader.interface.takeDelimiter('\n') catch |e| switch (e) {
+            error.StreamTooLong => {
+                _ = reader.interface.discardDelimiterInclusive('\n') catch return;
+                try ow.interface.writeAll("(input too long, try again)\n");
+                try ow.flush();
+                continue;
+            },
+            error.ReadFailed => return,
+        };
+        if (line == null) return; // EOF
+
+        const msg = std.mem.trim(u8, line.?, " \t\r\n");
+        if (msg.len == 0) continue;
+        if (std.mem.eql(u8, msg, "quit") or std.mem.eql(u8, msg, "exit")) return;
+
+        const rid = trace.newRequestId(io);
+        var result = runLoop(a, io, cfg, msg, rid.slice(), opts) catch |e| {
+            var ebuf: [4096]u8 = undefined;
+            var ew = std.Io.File.stderr().writer(io, &ebuf);
+            try ew.interface.print("error: {s}\n", .{@errorName(e)});
+            try ew.flush();
+            continue;
+        };
+        defer result.deinit(a);
+
+        try ow.interface.print("{s}\n", .{result.content});
+        try ow.flush();
+    }
 }
 
 /// Core iterative agent loop. Reusable from both CLI and gateway.
@@ -39,6 +93,7 @@ pub fn runLoop(
     cfg: config.ValidatedConfig,
     message: []const u8,
     request_id: []const u8,
+    opts: RunOptions,
 ) !AgentResult {
     var logger = obs.Logger.fromConfig(cfg, io);
 
@@ -61,6 +116,13 @@ pub fn runLoop(
 
     // Build tool definitions from allowed tools in the policy
     const tool_defs = try loadToolDefs(ta, io, cfg);
+
+    if (opts.verbose) {
+        verboseLog(io, "[verbose] request_id={s} model={s} tools={d} memory_items={d}\n", .{
+            request_id, cfg.raw.provider_primary.model, tool_defs.len, b.memory.len,
+        });
+        verboseLog(io, "[verbose] system prompt ({d} bytes)\n", .{b.system.len});
+    }
 
     // Build initial messages: system + user (with memory folded into system)
     var messages = std.array_list.Managed(provider_mod.Message).init(ta);
@@ -116,7 +178,23 @@ pub fn runLoop(
             .tool_calls_count = resp.tool_calls.len,
             .finish_reason = @tagName(resp.finish_reason),
             .turn = turn,
+            .prompt_tokens = resp.usage.prompt_tokens,
+            .completion_tokens = resp.usage.completion_tokens,
+            .total_tokens = resp.usage.total_tokens,
         });
+
+        if (opts.verbose) {
+            verboseLog(io, "[verbose] turn={d} finish_reason={s} content_bytes={d} tool_calls={d} tokens={d}/{d}/{d}\n", .{
+                turn, @tagName(resp.finish_reason), resp.content.len, resp.tool_calls.len,
+                resp.usage.prompt_tokens, resp.usage.completion_tokens, resp.usage.total_tokens,
+            });
+            if (resp.content.len > 0) {
+                verboseLog(io, "[verbose] assistant: {s}\n", .{resp.content[0..@min(resp.content.len, 500)]});
+            }
+            for (resp.tool_calls) |tc| {
+                verboseLog(io, "[verbose] tool_call: {s}({s}) id={s}\n", .{ tc.name, tc.arguments[0..@min(tc.arguments.len, 200)], tc.id });
+            }
+        }
 
         // If no tool calls, we are done
         if (resp.finish_reason != .tool_calls or resp.tool_calls.len == 0) {
@@ -169,6 +247,16 @@ pub fn runLoop(
                 .status = "ok",
                 .ok = tool_result.ok,
             });
+
+            if (opts.verbose) {
+                const preview = if (tool_result.data_json.len > 0)
+                    tool_result.data_json[0..@min(tool_result.data_json.len, 300)]
+                else
+                    tool_result.stdout[0..@min(tool_result.stdout.len, 300)];
+                verboseLog(io, "[verbose] tool_result: {s} ok={s} preview={s}\n", .{
+                    tc.name, if (tool_result.ok) "true" else "false", preview,
+                });
+            }
 
             // Build tool result content from data_json + stdout
             const result_content = if (tool_result.data_json.len > 0)
@@ -228,4 +316,12 @@ fn loadToolDefs(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig) !
     }
 
     return try defs.toOwnedSlice();
+}
+
+/// Write a formatted line to stderr (best-effort, for --verbose output).
+fn verboseLog(io: std.Io, comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stderr().writer(io, &buf);
+    w.interface.print(fmt, args) catch {};
+    w.flush() catch {};
 }

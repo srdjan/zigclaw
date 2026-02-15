@@ -79,7 +79,7 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         if (msg_v != .string) return jsonError(a, 400, request_id, "'message' must be string");
         const msg = msg_v.string;
 
-        var result = agent_loop.runLoop(a, io, cfg, msg, request_id) catch |e| {
+        var result = agent_loop.runLoop(a, io, cfg, msg, request_id, .{}) catch |e| {
             return jsonError(a, 500, request_id, @errorName(e));
         };
         defer result.deinit(a);

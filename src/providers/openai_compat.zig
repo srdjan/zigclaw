@@ -215,7 +215,7 @@ fn buildSystemMessage(a: std.mem.Allocator, system: ?[]const u8, memory: []const
     return try aw.toOwnedSlice();
 }
 
-fn parseChatCompletion(a: std.mem.Allocator, bytes: []const u8) !provider.ChatResponse {
+pub fn parseChatCompletion(a: std.mem.Allocator, bytes: []const u8) !provider.ChatResponse {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const ta = arena.allocator();
@@ -278,9 +278,26 @@ fn parseChatCompletion(a: std.mem.Allocator, bytes: []const u8) !provider.ChatRe
         }
     }
 
+    // Parse usage (prompt_tokens, completion_tokens, total_tokens)
+    var usage: provider.TokenUsage = .{};
+    if (root.object.get("usage")) |usage_val| {
+        if (usage_val == .object) {
+            if (usage_val.object.get("prompt_tokens")) |v| {
+                if (v == .integer) usage.prompt_tokens = std.math.cast(u64, v.integer) orelse 0;
+            }
+            if (usage_val.object.get("completion_tokens")) |v| {
+                if (v == .integer) usage.completion_tokens = std.math.cast(u64, v.integer) orelse 0;
+            }
+            if (usage_val.object.get("total_tokens")) |v| {
+                if (v == .integer) usage.total_tokens = std.math.cast(u64, v.integer) orelse 0;
+            }
+        }
+    }
+
     return .{
         .content = content,
         .tool_calls = tool_calls,
         .finish_reason = finish_reason,
+        .usage = usage,
     };
 }

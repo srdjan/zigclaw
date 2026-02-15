@@ -90,32 +90,18 @@ fn appendLineBestEffort(self: Logger, a: std.mem.Allocator, line: []const u8) vo
     const path = std.fs.path.join(a, &.{ dir, "zigclaw.jsonl" }) catch return;
     defer a.free(path);
 
-    // Read existing content, append new line, write back.
-    // This is correct for a best-effort logger with rotation; the file
-    // stays small because rotateIfNeeded caps its size.
-    const existing = std.Io.Dir.cwd().readFileAlloc(
-        io,
-        path,
-        a,
-        std.Io.Limit.limited(self.max_file_bytes),
-    ) catch "";
-    defer if (existing.len > 0) a.free(existing);
-
-    var combined = a.alloc(u8, existing.len + line.len) catch return;
-    defer a.free(combined);
-    @memcpy(combined[0..existing.len], existing);
-    @memcpy(combined[existing.len..], line);
-
-    var f = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch |e2| {
+    // O(1) append: open/create file without truncating, write at the current end offset.
+    // This avoids reading the entire file into memory and is crash-safe (worst case:
+    // incomplete last line, not full data loss).
+    var f = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false }) catch |e2| {
         std.log.err("obs: create log file failed: {s}", .{@errorName(e2)});
         return;
     };
     defer f.close(io);
 
-    var fbuf: [4096]u8 = undefined;
-    var fw = f.writer(io, &fbuf);
-    fw.interface.writeAll(combined) catch {};
-    fw.flush() catch {};
+    // Get current file size to write at the end
+    const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return;
+    f.writePositionalAll(io, line, st.size) catch {};
 }
 
 fn rotateIfNeeded(self: Logger, a: std.mem.Allocator, dir: []const u8) !void {

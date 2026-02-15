@@ -66,6 +66,12 @@ pub const Message = struct {
 
 pub const FinishReason = enum { stop, tool_calls, length, unknown };
 
+pub const TokenUsage = struct {
+    prompt_tokens: u64 = 0,
+    completion_tokens: u64 = 0,
+    total_tokens: u64 = 0,
+};
+
 // --- Request / Response ---
 
 pub const ChatRequest = struct {
@@ -88,6 +94,7 @@ pub const ChatResponse = struct {
     content: []u8, // empty string when only tool_calls are present
     tool_calls: []ToolCall = &.{}, // non-empty when finish_reason is .tool_calls
     finish_reason: FinishReason = .stop,
+    usage: TokenUsage = .{},
 };
 
 // For fixtures writing without owning new allocations

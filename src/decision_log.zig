@@ -37,32 +37,21 @@ pub fn logDecision(a: std.mem.Allocator, io: std.Io, ev: DecisionEvent) !void {
     try stream.write(ev.policy_hash);
     try stream.endObject();
 
-    const line = try out.toOwnedSlice();
+    const json = try out.toOwnedSlice();
+    defer a.free(json);
+
+    // Build line with trailing newline
+    var line = try a.alloc(u8, json.len + 1);
     defer a.free(line);
+    @memcpy(line[0..json.len], json);
+    line[json.len] = '\n';
 
-    // Read existing content, append new line, write back.
-    const existing = std.Io.Dir.cwd().readFileAlloc(
-        io,
-        path,
-        a,
-        std.Io.Limit.limited(4 * 1024 * 1024),
-    ) catch "";
-    defer if (existing.len > 0) a.free(existing);
-
-    // Build combined: existing + line + newline
-    var combined = try a.alloc(u8, existing.len + line.len + 1);
-    defer a.free(combined);
-    @memcpy(combined[0..existing.len], existing);
-    @memcpy(combined[existing.len..][0..line.len], line);
-    combined[existing.len + line.len] = '\n';
-
-    var f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    // O(1) append: open/create file without truncating, write at the current end.
+    var f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
     defer f.close(io);
 
-    var fbuf: [4096]u8 = undefined;
-    var fw = f.writer(io, &fbuf);
-    try fw.interface.writeAll(combined);
-    try fw.flush();
+    const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return;
+    try f.writePositionalAll(io, line, st.size);
 }
 
 pub fn nowUnixMs(io: std.Io) i64 {

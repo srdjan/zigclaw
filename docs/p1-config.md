@@ -18,6 +18,9 @@
   - `queue.retry_jitter_pct > 100` -> clamped to `100` with warning
   - `gateway.rate_limit_window_ms == 0` -> clamped to `1` with warning
   - `gateway.rate_limit_max_requests == 0` -> clamped to `1` with warning
+  - `automation.pickup_statuses == []` -> reset to `["open"]` with warning
+  - `persistence.git.allow_paths == []` -> reset to defaults with warning
+  - `persistence.git.remote_name == ""` -> reset to `"origin"` with warning
 
 ## Partial/Scaffolded
 - Parser is intentionally not full TOML spec (no datetime/inline tables/multiline strings support).
@@ -38,8 +41,11 @@ Current typed schema in `src/config.zig` includes:
 - `[providers.fixtures]`
 - `[providers.reliable]`
 - `[memory]`
+- `[memory.primitives]`
 - `[tools]`
 - `[queue]`
+- `[automation]`
+- `[persistence.git]`
 
 ## Normalized Example
 

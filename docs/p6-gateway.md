@@ -35,6 +35,9 @@ zig-out/bin/zigclaw gateway start --bind 127.0.0.1 --port 8787 --config zigclaw.
 - `POST /v1/agent/enqueue`
   - body: `{ "message": "...", "request_id"?: "...", "agent_id"?: "..." }`
   - `202` -> `{ "request_id": "...", "queued": true }`
+- `POST /v1/events`
+  - body: `{ "title"|"message": "...", "priority"?: "...", "owner"?: "...", "project"?: "...", "tags"?: "...", "context"?: "...", "idempotency_key"?: "...", "id"?: "..." }`
+  - `202` -> `{ "request_id": "...", "created": true|false, "task_slug": "...", "task_path": "..." }`
 - `GET /v1/requests/<request_id>[?include_payload=1|true|yes]`
   - `200` -> queue status JSON (`queued|processing|completed|canceled|not_found`)
 - `POST /v1/requests/<request_id>/cancel`

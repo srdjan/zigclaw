@@ -14,6 +14,8 @@ This document reflects the current implementation in `src/`.
 - Tool subsystem (manifest loading, schema validation, protocol runner): `src/tools/*.zig`
 - Queue worker and file-backed durable queue: `src/queue/worker.zig`
 - HTTP gateway with token auth and queue/tool/agent routes: `src/gateway/*.zig`
+- Primitive task/template system with markdown+YAML schema contracts: `src/primitives/tasks.zig`
+- Git-backed persistence lifecycle (`init`, `status`, `sync`): `src/persistence/git_sync.zig`
 - Observability and decision logging: `src/obs/logger.zig`, `src/decision_log.zig`
 
 ## Partial/Scaffolded
@@ -35,10 +37,12 @@ This document reflects the current implementation in `src/`.
 ## Queue boundary
 - Queue persistence is filesystem-based (`incoming`, `processing`, `outgoing`, `canceled`, `cancel_requests`).
 - Worker can run once or continuously and supports delayed retry scheduling.
+- Optional automation pickup can move primitive tasks from `open` to `in-progress` and enqueue execution.
 
 ## Gateway boundary
 - Token auth using bearer token from `<workspace_root>/.zigclaw/gateway.token`.
 - Request-size and optional rate-limit checks happen before auth-protected route handling.
+- `POST /v1/events` can convert event payloads into primitive tasks with idempotency support.
 
 ## Build and Deploy Model
 

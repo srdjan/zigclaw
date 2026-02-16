@@ -261,6 +261,28 @@ zig-out/bin/zigclaw queue metrics --config zigclaw.toml
 
 Queue states: `queued`, `processing`, `completed`, `canceled`, `not_found`.
 
+## Primitives and Git Persistence
+
+Create/list/complete primitive tasks:
+```sh
+zig-out/bin/zigclaw task add "Reply to client about shipping delay" --priority high --owner clawdious --project ops --tags "client,email" --config zigclaw.toml
+zig-out/bin/zigclaw task list --status open --format text --config zigclaw.toml
+zig-out/bin/zigclaw task done reply-to-client-about-shipping-delay --reason "Sent tracking and ETA" --config zigclaw.toml
+```
+
+Validate a primitive and inspect task template schema:
+```sh
+zig-out/bin/zigclaw primitive validate reply-to-client-about-shipping-delay --config zigclaw.toml
+zig-out/bin/zigclaw templates show task --config zigclaw.toml
+```
+
+Git-backed persistence workflow:
+```sh
+zig-out/bin/zigclaw git init --branch main --config zigclaw.toml
+zig-out/bin/zigclaw git status --config zigclaw.toml
+zig-out/bin/zigclaw git sync --message "sync primitive memory updates" --config zigclaw.toml
+```
+
 ## Gateway
 
 Start local gateway:

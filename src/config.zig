@@ -15,11 +15,12 @@ pub const ProviderConfig = struct {
     api_key_env: []const u8 = "OPENAI_API_KEY",
 };
 
-pub const FixturesMode = enum { off, record, replay };
+pub const FixturesMode = enum { off, record, replay, capsule_replay };
 
 pub const ProviderFixturesConfig = struct {
     mode: FixturesMode = .off,
     dir: []const u8 = "./.zigclaw/fixtures",
+    capsule_path: []const u8 = "",
 };
 
 pub const ProviderReliableConfig = struct {
@@ -196,9 +197,10 @@ pub const ValidatedConfig = struct {
             sys.provider_primary.base_url,
             sys.provider_primary.api_key_env,
         });
-        try w.print("  providers.fixtures.mode={s} dir={s}\n", .{
+        try w.print("  providers.fixtures.mode={s} dir={s} capsule_path={s}\n", .{
             @tagName(sys.provider_fixtures.mode),
             sys.provider_fixtures.dir,
+            sys.provider_fixtures.capsule_path,
         });
         try w.print("  providers.reliable.retries={d} backoff_ms={d}\n", .{
             sys.provider_reliable.retries,
@@ -399,6 +401,9 @@ pub const ValidatedConfig = struct {
         try w.writeAll("\n");
         try w.writeAll("dir = ");
         try writeTomlString(w, self.raw.provider_fixtures.dir);
+        try w.writeAll("\n");
+        try w.writeAll("capsule_path = ");
+        try writeTomlString(w, self.raw.provider_fixtures.capsule_path);
         try w.writeAll("\n\n");
 
         // [providers.reliable]
@@ -887,7 +892,7 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
 
         if (std.mem.eql(u8, k, "providers.fixtures.mode")) {
             const s = try coerceString(v);
-            if (std.mem.eql(u8, s, "off")) cfg.provider_fixtures.mode = .off else if (std.mem.eql(u8, s, "record")) cfg.provider_fixtures.mode = .record else if (std.mem.eql(u8, s, "replay")) cfg.provider_fixtures.mode = .replay else {
+            if (std.mem.eql(u8, s, "off")) cfg.provider_fixtures.mode = .off else if (std.mem.eql(u8, s, "record")) cfg.provider_fixtures.mode = .record else if (std.mem.eql(u8, s, "replay")) cfg.provider_fixtures.mode = .replay else if (std.mem.eql(u8, s, "capsule_replay")) cfg.provider_fixtures.mode = .capsule_replay else {
                 try warns.append(.{ .key_path = try a.dupe(u8, k), .message = try std.fmt.allocPrint(a, "unknown providers.fixtures.mode '{s}', using 'off'", .{s}) });
                 cfg.provider_fixtures.mode = .off;
             }
@@ -895,6 +900,10 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
         }
         if (std.mem.eql(u8, k, "providers.fixtures.dir")) {
             cfg.provider_fixtures.dir = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "providers.fixtures.capsule_path")) {
+            cfg.provider_fixtures.capsule_path = try coerceStringDup(a, v);
             continue;
         }
 
@@ -1414,6 +1423,7 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
         .{ &cfg.provider_primary.api_key, &d.provider_primary.api_key },
         .{ &cfg.provider_primary.api_key_env, &d.provider_primary.api_key_env },
         .{ &cfg.provider_fixtures.dir, &d.provider_fixtures.dir },
+        .{ &cfg.provider_fixtures.capsule_path, &d.provider_fixtures.capsule_path },
         .{ &cfg.memory.root, &d.memory.root },
         .{ &cfg.memory.primitives.templates_dir, &d.memory.primitives.templates_dir },
         .{ &cfg.automation.default_owner, &d.automation.default_owner },

@@ -751,6 +751,7 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\[providers.fixtures]
         \\mode = "off"
         \\dir = "./.zigclaw/fixtures"
+        \\capsule_path = ""
         \\
         \\[providers.reliable]
         \\retries = 2

@@ -3,10 +3,11 @@ const config = @import("../config.zig");
 const provider = @import("provider.zig");
 const openai = @import("openai_compat.zig");
 const replay = @import("replay.zig");
+const capsule_replay = @import("capsule_replay.zig");
 const recording = @import("recording.zig");
 const reliable = @import("reliable.zig");
 
-pub fn build(a: std.mem.Allocator, cfg: config.ValidatedConfig) !provider.Provider {
+pub fn build(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig) !provider.Provider {
     // Base provider
     var base = try buildBase(a, cfg.raw.provider_primary);
 
@@ -16,6 +17,11 @@ pub fn build(a: std.mem.Allocator, cfg: config.ValidatedConfig) !provider.Provid
         .replay => {
             const p = try replay.ReplayProvider.init(a, cfg.raw.provider_fixtures.dir);
             base = .{ .replay = p };
+        },
+        .capsule_replay => {
+            if (cfg.raw.provider_fixtures.capsule_path.len == 0) return error.InvalidCapsuleReplayPath;
+            const p = try capsule_replay.CapsuleReplayProvider.init(a, io, cfg.raw.provider_fixtures.capsule_path);
+            base = .{ .capsule_replay = p };
         },
         .record => {
             const inner_ptr = try a.create(provider.Provider);

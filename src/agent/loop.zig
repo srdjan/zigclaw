@@ -263,7 +263,7 @@ pub fn runLoop(
         }, ledger_ptr);
     }
 
-    var provider = try provider_factory.build(a, run_cfg);
+    var provider = try provider_factory.build(a, io, run_cfg);
     defer provider.deinit(a);
 
     logger.logJson(ta, .agent_run, request_id, .{
@@ -496,6 +496,33 @@ pub fn runLoop(
                 .status = "start",
                 .agent_id = active_agent.id,
             });
+
+            if (try provider.replayToolResult(ta, tc.id)) |replayed| {
+                const out_hash = try hash_mod.sha256HexAlloc(a, replayed.content);
+                try tool_output_hashes.append(out_hash);
+                recorder.record(.tool_response, turn, .{
+                    .tool = tc.name,
+                    .tool_call_id = tc.id,
+                    .ok = replayed.ok,
+                    .content = replayed.content,
+                }) catch {};
+
+                logger.logJson(ta, .tool_run, request_id, .{
+                    .tool = tc.name,
+                    .tool_call_id = tc.id,
+                    .turn = turn,
+                    .status = "replayed",
+                    .ok = replayed.ok,
+                    .agent_id = active_agent.id,
+                });
+
+                try messages.append(.{
+                    .role = .tool,
+                    .content = replayed.content,
+                    .tool_call_id = tc.id,
+                });
+                continue;
+            }
 
             if (std.mem.eql(u8, tc.name, delegate_tool_name)) {
                 const delegate_args = parseDelegateArgs(ta, tc.arguments) catch null;

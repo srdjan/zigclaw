@@ -47,6 +47,7 @@ api_key_env = "OPENAI_API_KEY"
 [providers.fixtures]
 mode = "off"
 dir = "./.zigclaw/fixtures"
+capsule_path = ""
 
 [providers.reliable]
 retries = 0

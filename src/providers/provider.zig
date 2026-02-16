@@ -2,6 +2,7 @@ const std = @import("std");
 
 const openai = @import("openai_compat.zig");
 const replay = @import("replay.zig");
+const capsule_replay = @import("capsule_replay.zig");
 const recording = @import("recording.zig");
 const reliable = @import("reliable.zig");
 const recall = @import("../memory/recall.zig");
@@ -10,6 +11,7 @@ pub const Provider = union(enum) {
     stub: StubProvider,
     openai_compat: openai.OpenAiCompatProvider,
     replay: replay.ReplayProvider,
+    capsule_replay: capsule_replay.CapsuleReplayProvider,
     record: recording.RecordingProvider,
     reliable: reliable.ReliableProvider,
 
@@ -18,6 +20,7 @@ pub const Provider = union(enum) {
             .stub => {},
             .openai_compat => |*p| p.deinit(a),
             .replay => |*p| p.deinit(a),
+            .capsule_replay => |*p| p.deinit(a),
             .record => |*p| p.deinit(a),
             .reliable => |*p| p.deinit(a),
         }
@@ -28,8 +31,18 @@ pub const Provider = union(enum) {
             .stub => |p| p.chat(a, io, req),
             .openai_compat => |p| p.chat(a, io, req),
             .replay => |p| p.chat(a, io, req),
+            .capsule_replay => |p| p.chat(a, io, req),
             .record => |p| p.chat(a, io, req),
             .reliable => |p| p.chat(a, io, req),
+        };
+    }
+
+    pub fn replayToolResult(self: Provider, a: std.mem.Allocator, tool_call_id: []const u8) !?ReplayedToolResult {
+        return switch (self) {
+            .capsule_replay => |p| try p.replayToolResult(a, tool_call_id),
+            .reliable => |p| try p.inner.replayToolResult(a, tool_call_id),
+            .record => |p| try p.inner.replayToolResult(a, tool_call_id),
+            else => null,
         };
     }
 };
@@ -95,6 +108,11 @@ pub const ChatResponse = struct {
     tool_calls: []ToolCall = &.{}, // non-empty when finish_reason is .tool_calls
     finish_reason: FinishReason = .stop,
     usage: TokenUsage = .{},
+};
+
+pub const ReplayedToolResult = struct {
+    ok: bool,
+    content: []u8,
 };
 
 // For fixtures writing without owning new allocations

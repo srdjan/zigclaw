@@ -1178,7 +1178,7 @@ test "provider fixtures record/replay (stub)" {
     vc2.raw.provider_fixtures = cfg.provider_fixtures;
     vc2.raw.provider_reliable = cfg.provider_reliable;
 
-    var p = try provider_factory.build(a, vc2);
+    var p = try provider_factory.build(a, io, vc2);
     defer p.deinit(a);
 
     const req = providers.ChatRequest{
@@ -1216,7 +1216,7 @@ test "provider fixtures record/replay (stub)" {
     vc3.raw.provider_fixtures = cfg_r.provider_fixtures;
     vc3.raw.provider_reliable = cfg_r.provider_reliable;
 
-    var pr = try provider_factory.build(a, vc3);
+    var pr = try provider_factory.build(a, io, vc3);
     defer pr.deinit(a);
 
     const resp2 = try pr.chat(a, io, req);
@@ -2388,6 +2388,172 @@ test "runLoop writes replay capsule and capsule replay returns run_end content" 
         try std.testing.expect(content == .string);
         try std.testing.expectEqualStrings(res.content, content.string);
     }
+}
+
+test "runLoop capsule replay mode replays tool responses without executing tools" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const ws_dir = "tests/.tmp_capsule_provider_replay";
+    std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, ws_dir);
+    try std.Io.Dir.cwd().createDirPath(io, "tests/.tmp_capsule_provider_replay/.zigclaw/capsules");
+
+    const capsule_path = "tests/.tmp_capsule_provider_replay/.zigclaw/capsules/replay_case.json";
+    {
+        var aw: std.Io.Writer.Allocating = .init(a);
+        defer aw.deinit();
+        var stream: std.json.Stringify = .{ .writer = &aw.writer };
+
+        try stream.beginObject();
+        try stream.objectField("request_id");
+        try stream.write("replay_case");
+        try stream.objectField("policy_hash");
+        try stream.write("deadbeef");
+        try stream.objectField("prompt_hash");
+        try stream.write("beefdead");
+        try stream.objectField("config_normalized");
+        try stream.write("config_version = 1");
+        try stream.objectField("workspace_snapshot");
+        try stream.beginObject();
+        try stream.objectField("root");
+        try stream.write(ws_dir);
+        try stream.objectField("skipped_large_files");
+        try stream.write(@as(usize, 0));
+        try stream.objectField("files");
+        try stream.beginArray();
+        try stream.endArray();
+        try stream.endObject();
+
+        try stream.objectField("events");
+        try stream.beginArray();
+
+        try stream.beginObject();
+        try stream.objectField("index");
+        try stream.write(@as(usize, 0));
+        try stream.objectField("kind");
+        try stream.write("run_start");
+        try stream.objectField("ts_ms");
+        try stream.write(@as(i64, 1));
+        try stream.objectField("request_id");
+        try stream.write("replay_case");
+        try stream.objectField("turn");
+        try stream.write(null);
+        try stream.objectField("payload");
+        try stream.write(.{ .agent_id = "default", .message = "ignored", .delegate_depth = @as(usize, 0) });
+        try stream.endObject();
+
+        try stream.beginObject();
+        try stream.objectField("index");
+        try stream.write(@as(usize, 1));
+        try stream.objectField("kind");
+        try stream.write("provider_response");
+        try stream.objectField("ts_ms");
+        try stream.write(@as(i64, 2));
+        try stream.objectField("request_id");
+        try stream.write("replay_case");
+        try stream.objectField("turn");
+        try stream.write(@as(usize, 0));
+        try stream.objectField("payload");
+        try stream.write(.{
+            .finish_reason = "tool_calls",
+            .content = "",
+            .tool_calls = @as(usize, 1),
+            .usage = .{ .prompt_tokens = @as(u64, 1), .completion_tokens = @as(u64, 1), .total_tokens = @as(u64, 2) },
+        });
+        try stream.endObject();
+
+        try stream.beginObject();
+        try stream.objectField("index");
+        try stream.write(@as(usize, 2));
+        try stream.objectField("kind");
+        try stream.write("tool_request");
+        try stream.objectField("ts_ms");
+        try stream.write(@as(i64, 3));
+        try stream.objectField("request_id");
+        try stream.write("replay_case");
+        try stream.objectField("turn");
+        try stream.write(@as(usize, 0));
+        try stream.objectField("payload");
+        try stream.write(.{
+            .tool = "imaginary_tool",
+            .tool_call_id = "tc_1",
+            .arguments = "{\"x\":1}",
+        });
+        try stream.endObject();
+
+        try stream.beginObject();
+        try stream.objectField("index");
+        try stream.write(@as(usize, 3));
+        try stream.objectField("kind");
+        try stream.write("tool_response");
+        try stream.objectField("ts_ms");
+        try stream.write(@as(i64, 4));
+        try stream.objectField("request_id");
+        try stream.write("replay_case");
+        try stream.objectField("turn");
+        try stream.write(@as(usize, 0));
+        try stream.objectField("payload");
+        try stream.write(.{
+            .tool = "imaginary_tool",
+            .tool_call_id = "tc_1",
+            .ok = true,
+            .content = "{\"ok\":true}",
+        });
+        try stream.endObject();
+
+        try stream.beginObject();
+        try stream.objectField("index");
+        try stream.write(@as(usize, 4));
+        try stream.objectField("kind");
+        try stream.write("provider_response");
+        try stream.objectField("ts_ms");
+        try stream.write(@as(i64, 5));
+        try stream.objectField("request_id");
+        try stream.write("replay_case");
+        try stream.objectField("turn");
+        try stream.write(@as(usize, 1));
+        try stream.objectField("payload");
+        try stream.write(.{
+            .finish_reason = "stop",
+            .content = "replayed final",
+            .tool_calls = @as(usize, 0),
+            .usage = .{ .prompt_tokens = @as(u64, 2), .completion_tokens = @as(u64, 3), .total_tokens = @as(u64, 5) },
+        });
+        try stream.endObject();
+
+        try stream.endArray();
+        try stream.objectField("receipt");
+        try stream.write(null);
+        try stream.endObject();
+
+        const capsule_json = try aw.toOwnedSlice();
+        defer a.free(capsule_json);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = capsule_path, .data = capsule_json });
+    }
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .capsule_replay;
+    vcq.raw.provider_fixtures.capsule_path = capsule_path;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.logging.enabled = false;
+    vcq.raw.security.workspace_root = ws_dir;
+
+    var res = try agent_loop.runLoop(a, io, vcq, "ignored at replay", "req_capsule_provider_replay", .{});
+    defer res.deinit(a);
+    try std.testing.expectEqualStrings("replayed final", res.content);
+    try std.testing.expectEqual(@as(usize, 2), res.turns);
 }
 
 test "capsule diff reports first divergence between two runs" {

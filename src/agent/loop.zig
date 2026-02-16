@@ -9,6 +9,7 @@ const trace = @import("../obs/trace.zig");
 const decision_log = @import("../decision_log.zig");
 const tools_runner = @import("../tools/runner.zig");
 const manifest_mod = @import("../tools/manifest.zig");
+const token_mod = @import("../policy/token.zig");
 
 const max_agent_turns: usize = 10;
 const default_max_delegate_depth: usize = 3;
@@ -26,6 +27,7 @@ pub const RunOptions = struct {
     agent_id: ?[]const u8 = null,
     delegate_depth: usize = 0,
     max_delegate_depth: usize = default_max_delegate_depth,
+    parent_token: ?*const token_mod.CapabilityToken = null,
     cancel_check: ?CancelCheck = null,
 };
 
@@ -121,7 +123,7 @@ pub fn runLoop(
     const ta = arena.allocator();
 
     const active_agent = try resolveActiveAgent(ta, cfg, opts.agent_id);
-    const run_cfg = try cfgForAgent(ta, cfg, active_agent);
+    const run_cfg = try cfgForAgent(ta, cfg, active_agent, opts.parent_token);
 
     var logger = obs.Logger.fromConfig(run_cfg, io);
     const decisions = decision_log.Logger.fromConfig(run_cfg, io);
@@ -259,6 +261,50 @@ pub fn runLoop(
     // Iterative loop
     var turn: usize = 0;
     while (turn < max_agent_turns) : (turn += 1) {
+        if (opts.parent_token) |parent_token| {
+            const now_ms = decision_log.nowUnixMs(io);
+
+            if (parent_token.isExpired(now_ms)) {
+                decisions.log(ta, .{
+                    .ts_unix_ms = now_ms,
+                    .request_id = request_id,
+                    .prompt_hash = b.prompt_hash_hex,
+                    .decision = "delegation.token.expired",
+                    .subject = active_agent.id,
+                    .allowed = false,
+                    .reason = "denied: delegation token expired",
+                    .policy_hash = run_cfg.policy.policyHash(),
+                });
+                logger.logJson(ta, .agent_run, request_id, .{
+                    .status = "delegation_token_expired",
+                    .turn = turn,
+                    .agent_id = active_agent.id,
+                    .token_hash = parent_token.token_hash[0..],
+                });
+                return error.DelegateTokenExpired;
+            }
+
+            if (!parent_token.isWithinTurnLimit(turn)) {
+                decisions.log(ta, .{
+                    .ts_unix_ms = now_ms,
+                    .request_id = request_id,
+                    .prompt_hash = b.prompt_hash_hex,
+                    .decision = "delegation.token.turns_exhausted",
+                    .subject = active_agent.id,
+                    .allowed = false,
+                    .reason = "denied: delegation token max_turns exhausted",
+                    .policy_hash = run_cfg.policy.policyHash(),
+                });
+                logger.logJson(ta, .agent_run, request_id, .{
+                    .status = "delegation_token_turns_exhausted",
+                    .turn = turn,
+                    .agent_id = active_agent.id,
+                    .token_hash = parent_token.token_hash[0..],
+                });
+                return error.DelegateTokenTurnsExceeded;
+            }
+        }
+
         if (try cancelRequested(opts)) {
             logger.logJson(ta, .agent_run, request_id, .{
                 .status = "canceled",
@@ -356,7 +402,7 @@ pub fn runLoop(
             });
 
             if (std.mem.eql(u8, tc.name, delegate_tool_name)) {
-                const delegate_json = handleDelegateToolCall(ta, io, cfg, request_id, active_agent, tc.arguments, opts) catch |e| {
+                const delegate_json = handleDelegateToolCall(ta, io, run_cfg, request_id, b.prompt_hash_hex, active_agent, tc.arguments, opts) catch |e| {
                     const err_msg = try std.fmt.allocPrint(ta, "Tool execution error: {s}", .{@errorName(e)});
                     logger.logJson(ta, .tool_run, request_id, .{
                         .tool = tc.name,
@@ -551,6 +597,56 @@ fn buildDelegateSchemaJsonAlloc(a: std.mem.Allocator, delegate_targets: []const 
     try stream.write(@as(u32, 8192));
     try stream.endObject();
 
+    try stream.objectField("requested_scope");
+    try stream.beginObject();
+    try stream.objectField("type");
+    try stream.write("object");
+    try stream.objectField("properties");
+    try stream.beginObject();
+
+    try stream.objectField("allowed_tools");
+    try stream.beginObject();
+    try stream.objectField("type");
+    try stream.write("array");
+    try stream.objectField("items");
+    try stream.beginObject();
+    try stream.objectField("type");
+    try stream.write("string");
+    try stream.endObject();
+    try stream.endObject();
+
+    try stream.objectField("write_paths");
+    try stream.beginObject();
+    try stream.objectField("type");
+    try stream.write("array");
+    try stream.objectField("items");
+    try stream.beginObject();
+    try stream.objectField("type");
+    try stream.write("string");
+    try stream.endObject();
+    try stream.endObject();
+
+    try stream.objectField("allow_network");
+    try stream.beginObject();
+    try stream.objectField("type");
+    try stream.write("boolean");
+    try stream.endObject();
+
+    try stream.objectField("max_turns");
+    try stream.beginObject();
+    try stream.objectField("type");
+    try stream.write("integer");
+    try stream.endObject();
+
+    try stream.objectField("expiry_ms");
+    try stream.beginObject();
+    try stream.objectField("type");
+    try stream.write("integer");
+    try stream.endObject();
+
+    try stream.endObject(); // requested_scope.properties
+    try stream.endObject(); // requested_scope
+
     try stream.endObject(); // properties
     try stream.endObject();
     return try aw.toOwnedSlice();
@@ -569,6 +665,7 @@ fn joinNamesAlloc(a: std.mem.Allocator, names: []const []const u8) ![]u8 {
 const DelegateArgs = struct {
     target_agent: []const u8,
     message: []const u8,
+    requested_scope: token_mod.RequestedScope = .{},
 };
 
 fn parseDelegateArgs(a: std.mem.Allocator, args_json: []const u8) !DelegateArgs {
@@ -582,10 +679,63 @@ fn parseDelegateArgs(a: std.mem.Allocator, args_json: []const u8) !DelegateArgs 
     if (target_v != .string or message_v != .string) return error.InvalidDelegateArgs;
     if (message_v.string.len == 0) return error.InvalidDelegateArgs;
 
+    var scope: token_mod.RequestedScope = .{};
+    if (obj.get("requested_scope")) |scope_v| {
+        if (scope_v != .object) return error.InvalidDelegateArgs;
+        const scope_obj = scope_v.object;
+        scope.allowed_tools = try parseOptionalStringArrayDup(a, scope_obj, "allowed_tools");
+        scope.write_paths = try parseOptionalStringArrayDup(a, scope_obj, "write_paths");
+        scope.allow_network = try parseOptionalBool(scope_obj, "allow_network");
+        scope.max_turns = try parseOptionalUsize(scope_obj, "max_turns");
+        scope.expiry_ms = try parseOptionalI64(scope_obj, "expiry_ms");
+    }
+
     return .{
         .target_agent = target_v.string,
         .message = message_v.string,
+        .requested_scope = scope,
     };
+}
+
+fn parseOptionalStringArrayDup(
+    a: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+    key: []const u8,
+) !?[]const []const u8 {
+    const value = obj.get(key) orelse return null;
+    if (value != .array) return error.InvalidDelegateArgs;
+
+    var out = std.array_list.Managed([]const u8).init(a);
+    errdefer {
+        for (out.items) |item| a.free(item);
+        out.deinit();
+    }
+    for (value.array.items) |entry| {
+        if (entry != .string) return error.InvalidDelegateArgs;
+        if (entry.string.len == 0) return error.InvalidDelegateArgs;
+        try out.append(try a.dupe(u8, entry.string));
+    }
+    return try out.toOwnedSlice();
+}
+
+fn parseOptionalBool(obj: std.json.ObjectMap, key: []const u8) !?bool {
+    const value = obj.get(key) orelse return null;
+    if (value != .bool) return error.InvalidDelegateArgs;
+    return value.bool;
+}
+
+fn parseOptionalUsize(obj: std.json.ObjectMap, key: []const u8) !?usize {
+    const value = obj.get(key) orelse return null;
+    if (value != .integer) return error.InvalidDelegateArgs;
+    if (value.integer <= 0) return error.InvalidDelegateArgs;
+    if (value.integer > std.math.maxInt(usize)) return error.InvalidDelegateArgs;
+    return @as(usize, @intCast(value.integer));
+}
+
+fn parseOptionalI64(obj: std.json.ObjectMap, key: []const u8) !?i64 {
+    const value = obj.get(key) orelse return null;
+    if (value != .integer) return error.InvalidDelegateArgs;
+    return value.integer;
 }
 
 fn isAllowedDelegate(source: config.AgentProfileConfig, target: []const u8) bool {
@@ -598,8 +748,9 @@ fn isAllowedDelegate(source: config.AgentProfileConfig, target: []const u8) bool
 fn handleDelegateToolCall(
     a: std.mem.Allocator,
     io: std.Io,
-    cfg: config.ValidatedConfig,
+    parent_cfg: config.ValidatedConfig,
     request_id: []const u8,
+    prompt_hash: []const u8,
     active_agent: ActiveAgent,
     args_json: []const u8,
     opts: RunOptions,
@@ -610,14 +761,44 @@ fn handleDelegateToolCall(
 
     const args = try parseDelegateArgs(a, args_json);
     if (!isAllowedDelegate(profile, args.target_agent)) return error.DelegateTargetDenied;
-    _ = findAgentProfile(cfg.raw, args.target_agent) orelse return error.UnknownAgent;
+    _ = findAgentProfile(parent_cfg.raw, args.target_agent) orelse return error.UnknownAgent;
+
+    var token = try token_mod.mint(a, .{
+        .allowed_tools = parent_cfg.policy.active.tools,
+        .write_paths = parent_cfg.policy.active.allow_write_paths,
+        .allow_network = parent_cfg.policy.active.allow_network,
+    }, args.requested_scope);
+    defer token.deinit(a);
+
+    const decisions = decision_log.Logger.fromConfig(parent_cfg, io);
+    const token_reason = try std.fmt.allocPrint(a, "minted token hash={s} tools={d}->{d} write_paths={d}->{d} network={s}->{s}", .{
+        token.token_hash[0..],
+        parent_cfg.policy.active.tools.len,
+        token.allowed_tools.len,
+        parent_cfg.policy.active.allow_write_paths.len,
+        token.write_paths.len,
+        if (parent_cfg.policy.active.allow_network) "true" else "false",
+        if (token.allow_network) "true" else "false",
+    });
+    defer a.free(token_reason);
+    decisions.log(a, .{
+        .ts_unix_ms = decision_log.nowUnixMs(io),
+        .request_id = request_id,
+        .prompt_hash = prompt_hash,
+        .decision = "delegation.token.mint",
+        .subject = args.target_agent,
+        .allowed = true,
+        .reason = token_reason,
+        .policy_hash = parent_cfg.policy.policyHash(),
+    });
 
     var child_opts = opts;
     child_opts.interactive = false;
     child_opts.agent_id = args.target_agent;
     child_opts.delegate_depth += 1;
+    child_opts.parent_token = &token;
 
-    var child_res = try runLoop(a, io, cfg, args.message, request_id, child_opts);
+    var child_res = try runLoop(a, io, parent_cfg, args.message, request_id, child_opts);
     defer child_res.deinit(a);
 
     var aw: std.Io.Writer.Allocating = .init(a);
@@ -632,6 +813,8 @@ fn handleDelegateToolCall(
     try stream.write(child_res.turns);
     try stream.objectField("content");
     try stream.write(child_res.content);
+    try stream.objectField("token_hash");
+    try stream.write(token.token_hash[0..]);
     try stream.endObject();
     return try aw.toOwnedSlice();
 }
@@ -659,7 +842,12 @@ fn findAgentProfile(raw: config.Config, id: []const u8) ?config.AgentProfileConf
     return null;
 }
 
-fn cfgForAgent(a: std.mem.Allocator, cfg: config.ValidatedConfig, active: ActiveAgent) !config.ValidatedConfig {
+fn cfgForAgent(
+    a: std.mem.Allocator,
+    cfg: config.ValidatedConfig,
+    active: ActiveAgent,
+    parent_token: ?*const token_mod.CapabilityToken,
+) !config.ValidatedConfig {
     var out = cfg;
     if (active.profile) |p| {
         if (!std.mem.eql(u8, p.capability_preset, cfg.raw.capabilities.active_preset)) {
@@ -667,6 +855,9 @@ fn cfgForAgent(a: std.mem.Allocator, cfg: config.ValidatedConfig, active: Active
             caps.active_preset = p.capability_preset;
             out.policy = try policy_mod.Policy.fromConfig(a, caps, cfg.raw.security.workspace_root);
         }
+    }
+    if (parent_token) |token| {
+        out.policy = try policy_mod.Policy.attenuate(a, out.policy, token.*);
     }
     return out;
 }

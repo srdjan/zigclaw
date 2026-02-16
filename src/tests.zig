@@ -4,6 +4,8 @@ const paths = @import("security/paths.zig");
 const fs_util = @import("util/fs.zig");
 const pairing = @import("security/pairing.zig");
 const config = @import("config.zig");
+const policy_mod = @import("policy.zig");
+const token_mod = @import("policy/token.zig");
 const queue_worker = @import("queue/worker.zig");
 
 // Helper: create a threaded Io suitable for tests that need file/network access.
@@ -341,6 +343,77 @@ test "config parses static multi-agent orchestration" {
     }
     try std.testing.expect(planner_ok);
     try std.testing.expect(writer_ok);
+}
+
+test "capability token mint attenuates requested scope to parent capabilities" {
+    const a = std.testing.allocator;
+
+    const requested_tools = [_][]const u8{ "fs_read", "shell_exec" };
+    const requested_paths = [_][]const u8{ "./tmp/work", "./outside" };
+
+    var token = try token_mod.mint(a, .{
+        .allowed_tools = &.{ "echo", "fs_read" },
+        .write_paths = &.{"./tmp"},
+        .allow_network = false,
+    }, .{
+        .allowed_tools = requested_tools[0..],
+        .write_paths = requested_paths[0..],
+        .allow_network = true,
+        .max_turns = 2,
+        .expiry_ms = 100,
+    });
+    defer token.deinit(a);
+
+    try std.testing.expectEqual(@as(usize, 1), token.allowed_tools.len);
+    try std.testing.expectEqualStrings("fs_read", token.allowed_tools[0]);
+    try std.testing.expectEqual(@as(usize, 1), token.write_paths.len);
+    try std.testing.expectEqualStrings("./tmp/work", token.write_paths[0]);
+    try std.testing.expect(!token.allow_network);
+    try std.testing.expect(token.isWithinTurnLimit(0));
+    try std.testing.expect(token.isWithinTurnLimit(1));
+    try std.testing.expect(!token.isWithinTurnLimit(2));
+    try std.testing.expect(!token.isExpired(99));
+    try std.testing.expect(token.isExpired(100));
+    try std.testing.expect(token.token_hash[0] != 0);
+}
+
+test "policy attenuation intersects child preset with capability token" {
+    const a = std.testing.allocator;
+
+    var child_presets = [_]config.PresetConfig{
+        .{
+            .name = "child_dev",
+            .tools = &.{ "echo", "fs_read", "fs_write" },
+            .allow_network = true,
+            .allow_write_paths = &.{ "./tmp", "./logs" },
+        },
+    };
+    const child_caps = config.CapabilitiesConfig{
+        .active_preset = "child_dev",
+        .presets = child_presets[0..],
+    };
+
+    var child_policy = try policy_mod.Policy.fromConfig(a, child_caps, ".");
+    defer child_policy.deinit(a);
+
+    var token = try token_mod.mint(a, .{
+        .allowed_tools = &.{ "echo", "fs_read" },
+        .write_paths = &.{"./tmp/work"},
+        .allow_network = false,
+    }, .{});
+    defer token.deinit(a);
+
+    var attenuated = try policy_mod.Policy.attenuate(a, child_policy, token);
+    defer attenuated.deinit(a);
+
+    try std.testing.expect(child_policy.isToolAllowed("fs_write"));
+    try std.testing.expect(!attenuated.isToolAllowed("fs_write"));
+    try std.testing.expect(attenuated.isToolAllowed("echo"));
+    try std.testing.expect(attenuated.isToolAllowed("fs_read"));
+    try std.testing.expectEqual(@as(usize, 1), attenuated.active.allow_write_paths.len);
+    try std.testing.expectEqualStrings("./tmp/work", attenuated.active.allow_write_paths[0]);
+    try std.testing.expect(!attenuated.active.allow_network);
+    try std.testing.expect(!std.mem.eql(u8, child_policy.policyHash(), attenuated.policyHash()));
 }
 
 test "queue enqueue-agent then worker once produces outgoing result" {

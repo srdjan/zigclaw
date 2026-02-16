@@ -2,6 +2,7 @@ const std = @import("std");
 const cfg = @import("config.zig");
 const hash_mod = @import("obs/hash.zig");
 const commands = @import("security/commands.zig");
+const token_mod = @import("policy/token.zig");
 
 pub const Mount = struct {
     host_path: []const u8,
@@ -19,6 +20,8 @@ pub const Preset = struct {
 pub const PolicyPlan = struct {
     active_preset: []const u8,
     workspace_root: []const u8,
+    allow_network: bool,
+    write_paths: []const []const u8,
 
     // derived allow-set (borrowed keys; Policy owns the strings)
     allowed_tools: std.StringHashMap(void),
@@ -121,6 +124,8 @@ pub const Policy = struct {
         const plan = PolicyPlan{
             .active_preset = active.?.name,
             .workspace_root = ws,
+            .allow_network = active.?.allow_network,
+            .write_paths = active.?.allow_write_paths,
             .allowed_tools = allowed_tools,
             .policy_hash_hex = hash_hex,
         };
@@ -147,6 +152,60 @@ pub const Policy = struct {
 
     pub fn policyHash(self: Policy) []const u8 {
         return self.plan.policy_hash_hex;
+    }
+
+    pub fn attenuate(a: std.mem.Allocator, child: Policy, token: token_mod.CapabilityToken) !Policy {
+        const ws = try a.dupe(u8, child.workspace_root);
+        errdefer a.free(ws);
+
+        const name = try std.fmt.allocPrint(a, "{s}+token", .{child.active.name});
+        errdefer a.free(name);
+
+        const tools = try intersectToolSlicesAlloc(a, child.active.tools, token.allowed_tools);
+        errdefer freeStrSlice(a, tools);
+
+        const write_paths = try intersectWritePathSlicesAlloc(a, child.active.allow_write_paths, token.write_paths);
+        errdefer freeStrSlice(a, write_paths);
+
+        const active = Preset{
+            .name = name,
+            .tools = tools,
+            .allow_network = child.active.allow_network and token.allow_network,
+            .allow_write_paths = write_paths,
+        };
+
+        const presets = try a.alloc(Preset, 1);
+        presets[0] = active;
+        errdefer {
+            a.free(active.name);
+            freeStrSlice(a, active.tools);
+            freeStrSlice(a, active.allow_write_paths);
+            a.free(presets);
+        }
+
+        var allowed_tools = std.StringHashMap(void).init(a);
+        errdefer allowed_tools.deinit();
+        for (active.tools) |tool| {
+            try allowed_tools.put(tool, {});
+        }
+
+        const hash_hex = try computePolicyHashHex(a, ws, active);
+
+        const plan = PolicyPlan{
+            .active_preset = active.name,
+            .workspace_root = ws,
+            .allow_network = active.allow_network,
+            .write_paths = active.allow_write_paths,
+            .allowed_tools = allowed_tools,
+            .policy_hash_hex = hash_hex,
+        };
+
+        return .{
+            .workspace_root = ws,
+            .active = active,
+            .presets = presets,
+            .plan = plan,
+        };
     }
 
     pub fn explainToolJsonAlloc(self: Policy, a: std.mem.Allocator, tool: []const u8) ![]u8 {
@@ -302,6 +361,51 @@ fn dupeStrSlice(a: std.mem.Allocator, items: []const []const u8) ![]const []cons
     return try out.toOwnedSlice();
 }
 
+fn intersectToolSlicesAlloc(
+    a: std.mem.Allocator,
+    child_tools: []const []const u8,
+    token_tools: []const []const u8,
+) ![]const []const u8 {
+    var out = std.array_list.Managed([]const u8).init(a);
+    errdefer {
+        for (out.items) |tool| a.free(tool);
+        out.deinit();
+    }
+
+    for (child_tools) |tool| {
+        if (!containsStr(token_tools, tool)) continue;
+        if (containsStr(out.items, tool)) continue;
+        try out.append(try a.dupe(u8, tool));
+    }
+    return try out.toOwnedSlice();
+}
+
+fn intersectWritePathSlicesAlloc(
+    a: std.mem.Allocator,
+    child_paths: []const []const u8,
+    token_paths: []const []const u8,
+) ![]const []const u8 {
+    var out = std.array_list.Managed([]const u8).init(a);
+    errdefer {
+        for (out.items) |path| a.free(path);
+        out.deinit();
+    }
+
+    for (child_paths) |child_path| {
+        for (token_paths) |token_path| {
+            const narrowed = narrowPathIntersection(child_path, token_path) orelse continue;
+            if (containsEquivalentPath(out.items, narrowed)) continue;
+            try out.append(try a.dupe(u8, narrowed));
+        }
+    }
+    return try out.toOwnedSlice();
+}
+
+fn freeStrSlice(a: std.mem.Allocator, items: []const []const u8) void {
+    for (items) |item| a.free(item);
+    a.free(items);
+}
+
 fn basename(path: []const u8) []const u8 {
     var i = path.len;
     while (i > 0) : (i -= 1) {
@@ -322,6 +426,26 @@ fn normalizePathForCompare(path: []const u8) []const u8 {
 fn isParentEscape(path: []const u8) bool {
     if (std.mem.eql(u8, path, "..")) return true;
     if (std.mem.startsWith(u8, path, "../")) return true;
+    return false;
+}
+
+fn narrowPathIntersection(a_path: []const u8, b_path: []const u8) ?[]const u8 {
+    if (pathWithin(a_path, b_path)) return a_path;
+    if (pathWithin(b_path, a_path)) return b_path;
+    return null;
+}
+
+fn containsEquivalentPath(paths: []const []const u8, path: []const u8) bool {
+    for (paths) |candidate| {
+        if (pathWithin(candidate, path) and pathWithin(path, candidate)) return true;
+    }
+    return false;
+}
+
+fn containsStr(items: []const []const u8, needle: []const u8) bool {
+    for (items) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
     return false;
 }
 

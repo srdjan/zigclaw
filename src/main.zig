@@ -1,11 +1,23 @@
 const std = @import("std");
 const App = @import("app.zig").App;
+const config_mod = @import("config.zig");
+const doctor = @import("doctor.zig");
 
 pub fn main(init: std.process.Init) !void {
+    const argv = init.minimal.args.toSlice(init.arena.allocator()) catch |e| {
+        try printCliError(init.io, &.{}, e);
+        std.process.exit(1);
+    };
+
+    run(init, argv) catch |e| {
+        try printCliError(init.io, argv, e);
+        std.process.exit(1);
+    };
+}
+
+fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
     const a = init.gpa;
     const io = init.io;
-
-    const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (argv.len < 2) {
         try usage(io);
@@ -21,13 +33,24 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
         const build_options = @import("build_options");
         const builtin = @import("builtin");
+        const as_json = hasFlag(argv, "--json");
         var obuf: [256]u8 = undefined;
         var ow = std.Io.File.stdout().writer(io, &obuf);
-        try ow.interface.print("zigclaw {s} ({s}-{s})\n", .{
-            build_options.version,
-            @tagName(builtin.cpu.arch),
-            @tagName(builtin.os.tag),
-        });
+        if (as_json) {
+            const out = try jsonObj(a, .{
+                .version = build_options.version,
+                .arch = @tagName(builtin.cpu.arch),
+                .os = @tagName(builtin.os.tag),
+            });
+            defer a.free(out);
+            try ow.interface.print("{s}\n", .{out});
+        } else {
+            try ow.interface.print("zigclaw {s} ({s}-{s})\n", .{
+                build_options.version,
+                @tagName(builtin.cpu.arch),
+                @tagName(builtin.os.tag),
+            });
+        }
         try ow.flush();
         return;
     }
@@ -37,42 +60,85 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "doctor")) {
+        const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+        const as_json = hasFlag(argv, "--json");
+        try doctor.run(a, io, cfg_path, as_json);
+        return;
+    }
+
     if (std.mem.eql(u8, cmd, "update")) {
+        const as_json = hasFlag(argv, "--json");
         const check_only = hasFlag(argv, "--check");
         const manifest_url = flagValue(argv, "--url") orelse "https://github.com/zigclaw/zigclaw/releases/latest/download/latest.json";
         const updater = @import("update/updater.zig");
+        const build_options = @import("build_options");
 
         if (check_only) {
-            const result = updater.check(a, io, manifest_url) catch |e| {
-                var ebuf: [4096]u8 = undefined;
-                var ew = std.Io.File.stderr().writer(io, &ebuf);
-                try ew.interface.print("update check failed: {s}\n", .{@errorName(e)});
-                try ew.flush();
-                return;
-            };
+            const result = try updater.check(a, io, manifest_url);
+            defer a.free(result.latest);
+            if (result.download_url) |u| a.free(u);
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
-            if (result.update_available) {
-                try ow.interface.print("update available: {s} -> {s}\n", .{ result.current, result.latest });
+            if (as_json) {
+                const out = try jsonObj(a, .{
+                    .ok = true,
+                    .check_only = true,
+                    .current = result.current,
+                    .latest = result.latest,
+                    .update_available = result.update_available,
+                    .download_url = result.download_url,
+                    .manifest_url = manifest_url,
+                });
+                defer a.free(out);
+                try ow.interface.print("{s}\n", .{out});
             } else {
-                try ow.interface.print("up to date: {s}\n", .{result.current});
+                if (result.update_available) {
+                    try ow.interface.print("update available: {s} -> {s}\n", .{ result.current, result.latest });
+                } else {
+                    try ow.interface.print("up to date: {s}\n", .{result.current});
+                }
             }
             try ow.flush();
         } else {
             const new_version = updater.update(a, io, manifest_url) catch |e| {
-                var ebuf: [4096]u8 = undefined;
-                var ew = std.Io.File.stderr().writer(io, &ebuf);
                 if (e == error.AlreadyUpToDate) {
-                    try ew.interface.print("already up to date: {s}\n", .{@import("build_options").version});
-                } else {
-                    try ew.interface.print("update failed: {s}\n", .{@errorName(e)});
+                    var obuf: [4096]u8 = undefined;
+                    var ow = std.Io.File.stdout().writer(io, &obuf);
+                    if (as_json) {
+                        const out = try jsonObj(a, .{
+                            .ok = true,
+                            .updated = false,
+                            .current = build_options.version,
+                            .latest = build_options.version,
+                            .manifest_url = manifest_url,
+                        });
+                        defer a.free(out);
+                        try ow.interface.print("{s}\n", .{out});
+                    } else {
+                        try ow.interface.print("already up to date: {s}\n", .{build_options.version});
+                    }
+                    try ow.flush();
+                    return;
                 }
-                try ew.flush();
-                return;
+                return e;
             };
+            defer a.free(new_version);
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
-            try ow.interface.print("updated to {s}\n", .{new_version});
+            if (as_json) {
+                const out = try jsonObj(a, .{
+                    .ok = true,
+                    .updated = true,
+                    .current = build_options.version,
+                    .latest = new_version,
+                    .manifest_url = manifest_url,
+                });
+                defer a.free(out);
+                try ow.interface.print("{s}\n", .{out});
+            } else {
+                try ow.interface.print("updated to {s}\n", .{new_version});
+            }
             try ow.flush();
         }
         return;
@@ -80,6 +146,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, cmd, "vault")) {
         const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
+        const as_json = hasFlag(argv, "--json");
         const vault_path = flagValue(argv, "--vault") orelse "./.zigclaw/vault.enc";
         const vault_mod = @import("vault/vault.zig");
         const prompts_mod = @import("setup/prompts.zig");
@@ -103,7 +170,18 @@ pub fn main(init: std.process.Init) !void {
 
             var obuf: [256]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
-            try ow.interface.print("stored '{s}' in vault\n", .{name});
+            if (as_json) {
+                const out = try jsonObj(a, .{
+                    .ok = true,
+                    .action = "set",
+                    .name = name,
+                    .vault_path = vault_path,
+                });
+                defer a.free(out);
+                try ow.interface.print("{s}\n", .{out});
+            } else {
+                try ow.interface.print("stored '{s}' in vault\n", .{name});
+            }
             try ow.flush();
             return;
         }
@@ -122,9 +200,31 @@ pub fn main(init: std.process.Init) !void {
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
             if (v.get(name)) |val| {
-                try ow.interface.print("{s}\n", .{val});
+                if (as_json) {
+                    const out = try jsonObj(a, .{
+                        .ok = true,
+                        .name = name,
+                        .found = true,
+                        .value = val,
+                    });
+                    defer a.free(out);
+                    try ow.interface.print("{s}\n", .{out});
+                } else {
+                    try ow.interface.print("{s}\n", .{val});
+                }
             } else {
-                try ow.interface.print("key '{s}' not found\n", .{name});
+                if (as_json) {
+                    const out = try jsonObj(a, .{
+                        .ok = true,
+                        .name = name,
+                        .found = false,
+                        .value = @as(?[]const u8, null),
+                    });
+                    defer a.free(out);
+                    try ow.interface.print("{s}\n", .{out});
+                } else {
+                    try ow.interface.print("key '{s}' not found\n", .{name});
+                }
             }
             try ow.flush();
             return;
@@ -146,11 +246,21 @@ pub fn main(init: std.process.Init) !void {
 
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
-            if (names.len == 0) {
-                try ow.interface.writeAll("(vault is empty)\n");
+            if (as_json) {
+                const out = try jsonObj(a, .{
+                    .ok = true,
+                    .count = names.len,
+                    .names = names,
+                });
+                defer a.free(out);
+                try ow.interface.print("{s}\n", .{out});
             } else {
-                for (names) |n| {
-                    try ow.interface.print("{s}\n", .{n});
+                if (names.len == 0) {
+                    try ow.interface.writeAll("(vault is empty)\n");
+                } else {
+                    for (names) |n| {
+                        try ow.interface.print("{s}\n", .{n});
+                    }
                 }
             }
             try ow.flush();
@@ -172,9 +282,31 @@ pub fn main(init: std.process.Init) !void {
             var ow = std.Io.File.stdout().writer(io, &obuf);
             if (v.delete(name)) {
                 try vault_mod.save(&v, a, io, vault_path, passphrase);
-                try ow.interface.print("deleted '{s}'\n", .{name});
+                if (as_json) {
+                    const out = try jsonObj(a, .{
+                        .ok = true,
+                        .action = "delete",
+                        .name = name,
+                        .deleted = true,
+                    });
+                    defer a.free(out);
+                    try ow.interface.print("{s}\n", .{out});
+                } else {
+                    try ow.interface.print("deleted '{s}'\n", .{name});
+                }
             } else {
-                try ow.interface.print("key '{s}' not found\n", .{name});
+                if (as_json) {
+                    const out = try jsonObj(a, .{
+                        .ok = true,
+                        .action = "delete",
+                        .name = name,
+                        .deleted = false,
+                    });
+                    defer a.free(out);
+                    try ow.interface.print("{s}\n", .{out});
+                } else {
+                    try ow.interface.print("key '{s}' not found\n", .{name});
+                }
             }
             try ow.flush();
             return;
@@ -300,12 +432,12 @@ pub fn main(init: std.process.Init) !void {
         const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
         if (std.mem.eql(u8, sub, "validate")) {
             const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
-            const format = flagValue(argv, "--format") orelse "toml";
+            const format = flagValue(argv, "--format") orelse if (hasFlag(argv, "--json")) "json" else "toml";
 
             var validated = try app.loadConfig(cfg_path);
             defer validated.deinit(a);
 
-            if (validated.warnings.len > 0) {
+            if (validated.warnings.len > 0 and !std.mem.eql(u8, format, "json")) {
                 var buf: [4096]u8 = undefined;
                 var fw = std.Io.File.stderr().writer(io, &buf);
                 for (validated.warnings) |wrn| {
@@ -316,7 +448,17 @@ pub fn main(init: std.process.Init) !void {
 
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
-            if (std.mem.eql(u8, format, "toml")) {
+            if (std.mem.eql(u8, format, "json")) {
+                var tw: std.Io.Writer.Allocating = .init(a);
+                defer tw.deinit();
+                try validated.printNormalizedToml(a, &tw.writer);
+                const normalized = try tw.toOwnedSlice();
+                defer a.free(normalized);
+
+                const out = try configValidateJsonAlloc(a, validated, normalized);
+                defer a.free(out);
+                try ow.interface.print("{s}\n", .{out});
+            } else if (std.mem.eql(u8, format, "toml")) {
                 try validated.printNormalizedToml(a, &ow.interface);
             } else {
                 try validated.print(&ow.interface);
@@ -334,20 +476,56 @@ pub fn main(init: std.process.Init) !void {
         const verbose = hasFlag(argv, "--verbose");
         const interactive = hasFlag(argv, "--interactive");
         const agent_id = flagValue(argv, "--agent");
+        const as_json = hasFlag(argv, "--json");
 
         var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
 
-        try app.runAgent(validated, msg, .{
-            .verbose = verbose,
-            .interactive = interactive,
-            .agent_id = agent_id,
-        });
+        if (as_json) {
+            if (interactive) return error.InvalidArgs;
+            const trace = @import("obs/trace.zig");
+            const loop = @import("agent/loop.zig");
+
+            const rid = trace.newRequestId(io);
+            var result = try loop.runLoop(a, io, validated, msg, rid.slice(), .{
+                .verbose = verbose,
+                .interactive = false,
+                .agent_id = agent_id,
+            });
+            defer result.deinit(a);
+
+            const out = if (result.attestation) |att|
+                try jsonObj(a, .{
+                    .request_id = rid.slice(),
+                    .turns = result.turns,
+                    .content = result.content,
+                    .merkle_root = att.merkle_root_hex[0..],
+                    .event_count = att.event_count,
+                })
+            else
+                try jsonObj(a, .{
+                    .request_id = rid.slice(),
+                    .turns = result.turns,
+                    .content = result.content,
+                });
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+        } else {
+            try app.runAgent(validated, msg, .{
+                .verbose = verbose,
+                .interactive = interactive,
+                .agent_id = agent_id,
+            });
+        }
         return;
     }
 
     if (std.mem.eql(u8, cmd, "init")) {
-        try scaffoldProject(a, io);
+        try scaffoldProject(a, io, hasFlag(argv, "--json"));
         return;
     }
 
@@ -392,6 +570,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, sub, "diff")) {
             const a_path = flagValue(argv, "--a") orelse return error.InvalidArgs;
             const b_path = flagValue(argv, "--b") orelse return error.InvalidArgs;
+            const as_json = hasFlag(argv, "--json");
 
             const left = try std.Io.Dir.cwd().readFileAlloc(io, a_path, a, std.Io.Limit.limited(4 * 1024 * 1024));
             defer a.free(left);
@@ -402,7 +581,17 @@ pub fn main(init: std.process.Init) !void {
             defer a.free(d);
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
-            try ow.interface.print("{s}", .{d});
+            if (as_json) {
+                const out = try jsonObj(a, .{
+                    .a = a_path,
+                    .b = b_path,
+                    .diff = d,
+                });
+                defer a.free(out);
+                try ow.interface.print("{s}\n", .{out});
+            } else {
+                try ow.interface.print("{s}", .{d});
+            }
             try ow.flush();
             return;
         }
@@ -781,9 +970,18 @@ pub fn main(init: std.process.Init) !void {
         defer validated.deinit(a);
 
         if (std.mem.eql(u8, sub, "hash")) {
+            const as_json = hasFlag(argv, "--json");
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
-            try ow.interface.print("{s}\n", .{validated.policy.policyHash()});
+            if (as_json) {
+                const out = try jsonObj(a, .{
+                    .policy_hash = validated.policy.policyHash(),
+                });
+                defer a.free(out);
+                try ow.interface.print("{s}\n", .{out});
+            } else {
+                try ow.interface.print("{s}\n", .{validated.policy.policyHash()});
+            }
             try ow.flush();
             return;
         }
@@ -997,7 +1195,99 @@ fn jsonObj(a: std.mem.Allocator, value: anytype) ![]u8 {
     return try aw.toOwnedSlice();
 }
 
-fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
+fn configValidateJsonAlloc(a: std.mem.Allocator, validated: config_mod.ValidatedConfig, normalized_toml: []const u8) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+
+    try stream.beginObject();
+    try stream.objectField("ok");
+    try stream.write(true);
+    try stream.objectField("policy_hash");
+    try stream.write(validated.policy.policyHash());
+    try stream.objectField("warnings");
+    try stream.beginArray();
+    for (validated.warnings) |w| {
+        try stream.beginObject();
+        try stream.objectField("key_path");
+        try stream.write(w.key_path);
+        try stream.objectField("message");
+        try stream.write(w.message);
+        try stream.endObject();
+    }
+    try stream.endArray();
+    try stream.objectField("normalized_toml");
+    try stream.write(normalized_toml);
+    try stream.endObject();
+
+    return try aw.toOwnedSlice();
+}
+
+fn printCliError(io: std.Io, argv: []const [:0]const u8, err: anyerror) !void {
+    const cmd: []const u8 = if (argv.len >= 2) argv[1] else "";
+    const as_json = hasFlag(argv, "--json");
+    const hint = errorHint(cmd, err);
+    const err_name = @errorName(err);
+
+    var ebuf: [4096]u8 = undefined;
+    var ew = std.Io.File.stderr().writer(io, &ebuf);
+
+    if (as_json) {
+        const payload = try jsonObj(std.heap.page_allocator, .{
+            .ok = false,
+            .command = cmd,
+            .@"error" = err_name,
+            .hint = hint,
+        });
+        defer std.heap.page_allocator.free(payload);
+        try ew.interface.print("{s}\n", .{payload});
+    } else {
+        try ew.interface.print("error: {s}\n", .{err_name});
+        if (hint) |h| try ew.interface.print("hint: {s}\n", .{h});
+    }
+    try ew.flush();
+}
+
+fn errorHint(cmd: []const u8, err: anyerror) ?[]const u8 {
+    if (err == error.InvalidArgs) {
+        if (std.mem.eql(u8, cmd, "agent")) return "agent arguments are invalid; `--json` cannot be combined with `--interactive`.";
+        if (std.mem.eql(u8, cmd, "vault")) return "vault arguments are invalid; run `zigclaw --help` for subcommand usage.";
+        if (std.mem.eql(u8, cmd, "queue")) return "queue arguments are invalid; provide required --request-id or --message flags.";
+        if (std.mem.eql(u8, cmd, "replay")) return "replay arguments are invalid; use --request-id/--capsule/--a/--b as required.";
+        return "arguments are invalid; run `zigclaw --help` for command syntax.";
+    }
+    if (err == error.FileNotFound) {
+        if (std.mem.eql(u8, cmd, "attest")) return "receipt file not found; run an agent request first and verify the request id.";
+        if (std.mem.eql(u8, cmd, "replay")) return "capsule file not found; verify the --capsule path or capture a run first.";
+        return "requested file/path was not found; verify the path and try again.";
+    }
+    if (err == error.TaskNotFound) return "task slug was not found; run `zigclaw task list` to find valid slugs.";
+    if (err == error.DuplicateRequestId) return "request id already exists; use a unique --request-id.";
+    if (err == error.ToolNotAllowed) return "tool denied by policy; run `zigclaw policy explain --tool <name>`.";
+    if (err == error.ToolNetworkNotAllowed) return "tool requires network but active preset denies network; choose a different preset.";
+    if (err == error.InvalidToolArgs) return "tool args do not match schema; run `zigclaw tools describe <tool>`.";
+    if (err == error.UnregisteredTool) return "tool is not in compiled registry and tools.registry.strict=true; adjust presets or registry.";
+    if (err == error.NetworkToolRequiresPresetNetwork) return "preset contains a network tool while allow_network=false.";
+    if (err == error.DelegationPresetEscalation) return "delegation target preset exceeds parent permissions; make child preset a subset.";
+    if (err == error.UnknownCapabilityPreset) return "agent references an unknown capability preset.";
+    if (err == error.VaultPassphraseRequired) return "vault passphrase is required.";
+    if (err == error.VaultKeyNotFound) return "vault key not found; set it with `zigclaw vault set <name>`.";
+    if (err == error.InvalidVaultFile or err == error.InvalidVaultData or err == error.DecryptionFailed) {
+        return "vault decryption failed; verify passphrase and vault file path.";
+    }
+    if (err == error.ManifestFetchFailed) return "failed to fetch update manifest; check internet access or override --url.";
+    if (err == error.InvalidManifest) return "update manifest format is invalid.";
+    if (err == error.PlatformNotInManifest or err == error.UnsupportedPlatform) return "no update artifact for this platform.";
+    if (err == error.DownloadFailed) return "failed to download update binary; check network and URL.";
+    if (err == error.ChecksumMismatch) return "download checksum mismatch; retry update later.";
+    if (err == error.ReplaceFailed) return "failed to replace zigclaw binary; check file permissions and install location.";
+    if (err == error.GitNotInstalled) return "git is required but not available in PATH.";
+    if (err == error.InvalidCapsule) return "replay capsule format is invalid.";
+    if (err == error.EventIndexOutOfBounds) return "event index is out of range for this receipt.";
+    return null;
+}
+
+fn scaffoldProject(a: std.mem.Allocator, io: std.Io, as_json: bool) !void {
     const dir = std.Io.Dir.cwd();
     var obuf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
@@ -1005,7 +1295,18 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
     // Check if zigclaw.toml already exists
     const exists = if (dir.statFile(io, "zigclaw.toml", .{})) |_| true else |_| false;
     if (exists) {
-        try ow.interface.writeAll("zigclaw.toml already exists. Skipping.\n");
+        if (as_json) {
+            const out = try jsonObj(a, .{
+                .ok = true,
+                .created = false,
+                .config_path = "zigclaw.toml",
+                .reason = "already_exists",
+            });
+            defer a.free(out);
+            try ow.interface.print("{s}\n", .{out});
+        } else {
+            try ow.interface.writeAll("zigclaw.toml already exists. Skipping.\n");
+        }
         try ow.flush();
         return;
     }
@@ -1128,13 +1429,7 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\
     ;
 
-    dir.writeFile(io, .{ .sub_path = "zigclaw.toml", .data = default_config }) catch |e| {
-        const msg = try std.fmt.allocPrint(a, "failed to write zigclaw.toml: {s}\n", .{@errorName(e)});
-        defer a.free(msg);
-        try ow.interface.writeAll(msg);
-        try ow.flush();
-        return;
-    };
+    try dir.writeFile(io, .{ .sub_path = "zigclaw.toml", .data = default_config });
 
     // Create directories
     dir.createDirPath(io, ".zigclaw/memory") catch {};
@@ -1159,11 +1454,27 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         dir.writeFile(io, .{ .sub_path = ".zigclaw/memory/templates/task.md", .data = default_tpl }) catch {};
     }
 
-    try ow.interface.writeAll("Created zigclaw.toml and .zigclaw/ directories.\n");
-    try ow.interface.writeAll("Next steps:\n");
-    try ow.interface.writeAll("  1. Set OPENAI_API_KEY (or change providers.primary.kind to \"stub\")\n");
-    try ow.interface.writeAll("  2. Build plugins: zig build plugins\n");
-    try ow.interface.writeAll("  3. Run: zigclaw agent --message \"hello\"\n");
+    if (as_json) {
+        const out = try jsonObj(a, .{
+            .ok = true,
+            .created = true,
+            .config_path = "zigclaw.toml",
+            .workspace_dir = ".zigclaw",
+            .next_steps = .{
+                "Set OPENAI_API_KEY (or set providers.primary.kind=\"stub\")",
+                "zig build plugins",
+                "zigclaw agent --message \"hello\"",
+            },
+        });
+        defer a.free(out);
+        try ow.interface.print("{s}\n", .{out});
+    } else {
+        try ow.interface.writeAll("Created zigclaw.toml and .zigclaw/ directories.\n");
+        try ow.interface.writeAll("Next steps:\n");
+        try ow.interface.writeAll("  1. Set OPENAI_API_KEY (or change providers.primary.kind to \"stub\")\n");
+        try ow.interface.writeAll("  2. Build plugins: zig build plugins\n");
+        try ow.interface.writeAll("  3. Run: zigclaw agent --message \"hello\"\n");
+    }
     try ow.flush();
 }
 
@@ -1174,17 +1485,18 @@ fn usage(io: std.Io) !void {
         \\zigclaw
         \\
         \\Usage:
-        \\  zigclaw version
+        \\  zigclaw version [--json]
+        \\  zigclaw doctor [--config zigclaw.toml] [--json]
         \\  zigclaw setup
-        \\  zigclaw update [--check] [--url <manifest-url>]
-        \\  zigclaw vault set <name> [--vault <path>]
-        \\  zigclaw vault get <name> [--vault <path>]
-        \\  zigclaw vault list [--vault <path>]
-        \\  zigclaw vault delete <name> [--vault <path>]
-        \\  zigclaw init
-        \\  zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml]
+        \\  zigclaw update [--check] [--url <manifest-url>] [--json]
+        \\  zigclaw vault set <name> [--vault <path>] [--json]
+        \\  zigclaw vault get <name> [--vault <path>] [--json]
+        \\  zigclaw vault list [--vault <path>] [--json]
+        \\  zigclaw vault delete <name> [--vault <path>] [--json]
+        \\  zigclaw init [--json]
+        \\  zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml] [--json]
         \\  zigclaw prompt dump --message "..." [--format json|text] [--out path] [--config zigclaw.toml]
-        \\  zigclaw prompt diff --a file --b file
+        \\  zigclaw prompt diff --a file --b file [--json]
         \\  zigclaw tools list [--config zigclaw.toml]
         \\  zigclaw tools describe <tool> [--config zigclaw.toml]
         \\  zigclaw tools run <tool> --args '{}' [--config zigclaw.toml]
@@ -1203,8 +1515,8 @@ fn usage(io: std.Io) !void {
         \\  zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]
         \\  zigclaw queue cancel --request-id <id> [--config zigclaw.toml]
         \\  zigclaw queue metrics [--config zigclaw.toml]
-        \\  zigclaw config validate [--config zigclaw.toml] [--format toml|text]
-        \\  zigclaw policy hash [--config zigclaw.toml]
+        \\  zigclaw config validate [--config zigclaw.toml] [--format toml|text|json] [--json]
+        \\  zigclaw policy hash [--config zigclaw.toml] [--json]
         \\  zigclaw policy explain (--tool <name> | --mount <path> | --command "cmd") [--config zigclaw.toml]
         \\  zigclaw audit report [--request-id <id>] [--from <ts>] [--to <ts>] [--format text|json] [--config zigclaw.toml]
         \\  zigclaw audit verify --request-id <id> [--format text|json] [--config zigclaw.toml]

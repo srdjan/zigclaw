@@ -6,6 +6,7 @@ This document reflects the current implementation in `src/`.
 
 ## Implemented
 - CLI entrypoint and command router: `src/main.zig`
+- Runtime diagnostics command (`zigclaw doctor`): `src/doctor.zig`
 - Interactive setup wizard and prompts: `src/setup/*.zig`
 - Binary self-update flow (`check` + atomic replace): `src/update/*.zig`
 - Encrypted vault storage for secrets: `src/vault/*.zig`

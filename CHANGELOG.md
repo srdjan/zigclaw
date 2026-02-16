@@ -20,6 +20,10 @@ All notable changes to this project will be documented in this file.
   - replay capsules with capture/run/diff commands (`replay capture|run|diff`)
   - capsule replay provider mode (`providers.fixtures.mode = "capsule_replay"`)
 - Delegation capability tokens for least-privilege sub-agent execution attenuation.
+- UX/usability improvements:
+  - new diagnostics command: `zigclaw doctor` (dependency/config/plugin/writability/provider checks)
+  - broader machine-readable output via `--json` on key commands (`version`, `update`, `vault`, `init`, non-interactive `agent`, `prompt diff`, `config validate`, `policy hash`)
+  - actionable CLI error messages with command-specific remediation hints
 - New configuration section `[persistence.git]` with path allow/deny filters, branch/remote controls, and push defaults.
 - New configuration fields:
   - `vault_path`

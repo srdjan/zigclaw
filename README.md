@@ -56,16 +56,17 @@ Command list is taken from `src/main.zig:usage()`.
 
 ```text
 zigclaw version
+zigclaw doctor [--config zigclaw.toml] [--json]
 zigclaw setup
-zigclaw update [--check] [--url <manifest-url>]
-zigclaw vault set <name> [--vault <path>]
-zigclaw vault get <name> [--vault <path>]
-zigclaw vault list [--vault <path>]
-zigclaw vault delete <name> [--vault <path>]
-zigclaw init
-zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml]
+zigclaw update [--check] [--url <manifest-url>] [--json]
+zigclaw vault set <name> [--vault <path>] [--json]
+zigclaw vault get <name> [--vault <path>] [--json]
+zigclaw vault list [--vault <path>] [--json]
+zigclaw vault delete <name> [--vault <path>] [--json]
+zigclaw init [--json]
+zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml] [--json]
 zigclaw prompt dump --message "..." [--format json|text] [--out path] [--config zigclaw.toml]
-zigclaw prompt diff --a file --b file
+zigclaw prompt diff --a file --b file [--json]
 zigclaw tools list [--config zigclaw.toml]
 zigclaw tools describe <tool> [--config zigclaw.toml]
 zigclaw tools run <tool> --args '{}' [--config zigclaw.toml]
@@ -84,8 +85,8 @@ zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.tom
 zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]
 zigclaw queue cancel --request-id <id> [--config zigclaw.toml]
 zigclaw queue metrics [--config zigclaw.toml]
-zigclaw config validate [--config zigclaw.toml] [--format toml|text]
-zigclaw policy hash [--config zigclaw.toml]
+zigclaw config validate [--config zigclaw.toml] [--format toml|text|json] [--json]
+zigclaw policy hash [--config zigclaw.toml] [--json]
 zigclaw policy explain (--tool <name> | --mount <path> | --command "cmd") [--config zigclaw.toml]
 zigclaw audit report [--request-id <id>] [--from <ts>] [--to <ts>] [--format text|json] [--config zigclaw.toml]
 zigclaw audit verify --request-id <id> [--format text|json] [--config zigclaw.toml]
@@ -319,6 +320,14 @@ Self-update:
 zig-out/bin/zigclaw update --check
 zig-out/bin/zigclaw update
 ```
+
+Doctor diagnostics:
+```sh
+zig-out/bin/zigclaw doctor --config zigclaw.toml
+zig-out/bin/zigclaw doctor --config zigclaw.toml --json
+```
+
+Most commands now support `--json` for machine-readable output (for example: `version`, `doctor`, `update`, `vault`, `init`, non-interactive `agent`, `prompt diff`, `config validate`, `policy hash`).
 
 ## Queue
 

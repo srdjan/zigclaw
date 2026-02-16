@@ -5,11 +5,14 @@ const provider_mod = @import("../providers/provider.zig");
 const provider_factory = @import("../providers/factory.zig");
 const bundle_mod = @import("bundle.zig");
 const obs = @import("../obs/logger.zig");
+const hash_mod = @import("../obs/hash.zig");
 const trace = @import("../obs/trace.zig");
 const decision_log = @import("../decision_log.zig");
 const tools_runner = @import("../tools/runner.zig");
 const manifest_mod = @import("../tools/manifest.zig");
 const token_mod = @import("../policy/token.zig");
+const att_ledger = @import("../attestation/ledger.zig");
+const att_receipt = @import("../attestation/receipt.zig");
 
 const max_agent_turns: usize = 10;
 const default_max_delegate_depth: usize = 3;
@@ -39,10 +42,16 @@ const ActiveAgent = struct {
 pub const AgentResult = struct {
     content: []u8,
     turns: usize,
+    attestation: ?Attestation = null,
 
     pub fn deinit(self: *AgentResult, a: std.mem.Allocator) void {
         a.free(self.content);
     }
+};
+
+pub const Attestation = struct {
+    merkle_root_hex: [64]u8,
+    event_count: usize,
 };
 
 /// CLI entry point: runs the agent loop and prints the result to stdout.
@@ -117,6 +126,7 @@ pub fn runLoop(
     opts: RunOptions,
 ) anyerror!AgentResult {
     if (try cancelRequested(opts)) return error.Canceled;
+    const ts_start_ms = decision_log.nowUnixMs(io);
 
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -127,11 +137,28 @@ pub fn runLoop(
 
     var logger = obs.Logger.fromConfig(run_cfg, io);
     const decisions = decision_log.Logger.fromConfig(run_cfg, io);
+    const ledger_enabled = opts.delegate_depth == 0;
+
+    var ledger = att_ledger.MerkleTree.init(a);
+    defer ledger.deinit();
+    const ledger_ptr: ?*att_ledger.MerkleTree = if (ledger_enabled) &ledger else null;
+
+    var tool_args_hashes = std.array_list.Managed([]const u8).init(a);
+    defer {
+        for (tool_args_hashes.items) |h| a.free(h);
+        tool_args_hashes.deinit();
+    }
+
+    var tool_output_hashes = std.array_list.Managed([]const u8).init(a);
+    defer {
+        for (tool_output_hashes.items) |h| a.free(h);
+        tool_output_hashes.deinit();
+    }
 
     var b = try bundle_mod.build(ta, io, run_cfg, message);
     defer b.deinit(ta);
 
-    decisions.log(ta, .{
+    decisions.logAndRecord(ta, .{
         .ts_unix_ms = decision_log.nowUnixMs(io),
         .request_id = request_id,
         .prompt_hash = b.prompt_hash_hex,
@@ -143,8 +170,8 @@ pub fn runLoop(
         else
             "allowed by memory backend config",
         .policy_hash = run_cfg.policy.policyHash(),
-    });
-    decisions.log(ta, .{
+    }, ledger_ptr);
+    decisions.logAndRecord(ta, .{
         .ts_unix_ms = decision_log.nowUnixMs(io),
         .request_id = request_id,
         .prompt_hash = b.prompt_hash_hex,
@@ -153,12 +180,12 @@ pub fn runLoop(
         .allowed = true,
         .reason = "memory recall executed",
         .policy_hash = run_cfg.policy.policyHash(),
-    });
+    }, ledger_ptr);
 
     const provider_kind = @tagName(run_cfg.raw.provider_primary.kind);
     const provider_requires_network = run_cfg.raw.provider_primary.kind == .openai_compat;
     const provider_network_allowed = !provider_requires_network or run_cfg.policy.active.allow_network;
-    decisions.log(ta, .{
+    decisions.logAndRecord(ta, .{
         .ts_unix_ms = decision_log.nowUnixMs(io),
         .request_id = request_id,
         .prompt_hash = b.prompt_hash_hex,
@@ -170,10 +197,10 @@ pub fn runLoop(
         else
             "allowed: provider does not require network",
         .policy_hash = run_cfg.policy.policyHash(),
-    });
+    }, ledger_ptr);
     if (!provider_network_allowed) return error.ProviderNetworkNotAllowed;
 
-    decisions.log(ta, .{
+    decisions.logAndRecord(ta, .{
         .ts_unix_ms = decision_log.nowUnixMs(io),
         .request_id = request_id,
         .prompt_hash = b.prompt_hash_hex,
@@ -182,10 +209,10 @@ pub fn runLoop(
         .allowed = true,
         .reason = "provider/model selected for run",
         .policy_hash = run_cfg.policy.policyHash(),
-    });
+    }, ledger_ptr);
 
     if (run_cfg.raw.provider_fixtures.mode != .off) {
-        decisions.log(ta, .{
+        decisions.logAndRecord(ta, .{
             .ts_unix_ms = decision_log.nowUnixMs(io),
             .request_id = request_id,
             .prompt_hash = b.prompt_hash_hex,
@@ -194,11 +221,11 @@ pub fn runLoop(
             .allowed = true,
             .reason = "fixtures wrapper enabled",
             .policy_hash = run_cfg.policy.policyHash(),
-        });
+        }, ledger_ptr);
     }
 
     if (run_cfg.raw.provider_reliable.retries > 0) {
-        decisions.log(ta, .{
+        decisions.logAndRecord(ta, .{
             .ts_unix_ms = decision_log.nowUnixMs(io),
             .request_id = request_id,
             .prompt_hash = b.prompt_hash_hex,
@@ -207,7 +234,7 @@ pub fn runLoop(
             .allowed = true,
             .reason = "reliable retry wrapper enabled",
             .policy_hash = run_cfg.policy.policyHash(),
-        });
+        }, ledger_ptr);
     }
 
     var provider = try provider_factory.build(a, run_cfg);
@@ -265,7 +292,7 @@ pub fn runLoop(
             const now_ms = decision_log.nowUnixMs(io);
 
             if (parent_token.isExpired(now_ms)) {
-                decisions.log(ta, .{
+                decisions.logAndRecord(ta, .{
                     .ts_unix_ms = now_ms,
                     .request_id = request_id,
                     .prompt_hash = b.prompt_hash_hex,
@@ -274,7 +301,7 @@ pub fn runLoop(
                     .allowed = false,
                     .reason = "denied: delegation token expired",
                     .policy_hash = run_cfg.policy.policyHash(),
-                });
+                }, ledger_ptr);
                 logger.logJson(ta, .agent_run, request_id, .{
                     .status = "delegation_token_expired",
                     .turn = turn,
@@ -285,7 +312,7 @@ pub fn runLoop(
             }
 
             if (!parent_token.isWithinTurnLimit(turn)) {
-                decisions.log(ta, .{
+                decisions.logAndRecord(ta, .{
                     .ts_unix_ms = now_ms,
                     .request_id = request_id,
                     .prompt_hash = b.prompt_hash_hex,
@@ -294,7 +321,7 @@ pub fn runLoop(
                     .allowed = false,
                     .reason = "denied: delegation token max_turns exhausted",
                     .policy_hash = run_cfg.policy.policyHash(),
-                });
+                }, ledger_ptr);
                 logger.logJson(ta, .agent_run, request_id, .{
                     .status = "delegation_token_turns_exhausted",
                     .turn = turn,
@@ -369,9 +396,23 @@ pub fn runLoop(
 
         // If no tool calls, we are done
         if (resp.finish_reason != .tool_calls or resp.tool_calls.len == 0) {
+            const attestation = try finalizeAttestation(
+                a,
+                io,
+                run_cfg,
+                request_id,
+                b.prompt_hash_hex,
+                ts_start_ms,
+                decision_log.nowUnixMs(io),
+                ledger_enabled,
+                &ledger,
+                tool_args_hashes.items,
+                tool_output_hashes.items,
+            );
             return .{
                 .content = try a.dupe(u8, resp.content),
                 .turns = turn + 1,
+                .attestation = attestation,
             };
         }
 
@@ -384,6 +425,9 @@ pub fn runLoop(
 
         // Execute each tool call and append results
         for (resp.tool_calls) |tc| {
+            const args_hash = try hash_mod.sha256HexAlloc(a, tc.arguments);
+            try tool_args_hashes.append(args_hash);
+
             if (try cancelRequested(opts)) {
                 logger.logJson(ta, .agent_run, request_id, .{
                     .status = "canceled",
@@ -402,8 +446,10 @@ pub fn runLoop(
             });
 
             if (std.mem.eql(u8, tc.name, delegate_tool_name)) {
-                const delegate_json = handleDelegateToolCall(ta, io, run_cfg, request_id, b.prompt_hash_hex, active_agent, tc.arguments, opts) catch |e| {
+                const delegate_json = handleDelegateToolCall(ta, io, run_cfg, request_id, b.prompt_hash_hex, active_agent, tc.arguments, opts, ledger_ptr) catch |e| {
                     const err_msg = try std.fmt.allocPrint(ta, "Tool execution error: {s}", .{@errorName(e)});
+                    const out_hash = try hash_mod.sha256HexAlloc(a, err_msg);
+                    try tool_output_hashes.append(out_hash);
                     logger.logJson(ta, .tool_run, request_id, .{
                         .tool = tc.name,
                         .tool_call_id = tc.id,
@@ -419,6 +465,8 @@ pub fn runLoop(
                     });
                     continue;
                 };
+                const out_hash = try hash_mod.sha256HexAlloc(a, delegate_json);
+                try tool_output_hashes.append(out_hash);
 
                 logger.logJson(ta, .tool_run, request_id, .{
                     .tool = tc.name,
@@ -439,9 +487,12 @@ pub fn runLoop(
 
             const tool_result = tools_runner.run(ta, io, run_cfg, request_id, tc.name, tc.arguments, .{
                 .prompt_hash = b.prompt_hash_hex,
+                .ledger = ledger_ptr,
             }) catch |e| {
                 // Tool execution failed - send error back to LLM
                 const err_msg = try std.fmt.allocPrint(ta, "Tool execution error: {s}", .{@errorName(e)});
+                const out_hash = try hash_mod.sha256HexAlloc(a, err_msg);
+                try tool_output_hashes.append(out_hash);
 
                 logger.logJson(ta, .tool_run, request_id, .{
                     .tool = tc.name,
@@ -484,6 +535,8 @@ pub fn runLoop(
                 tool_result.data_json
             else
                 tool_result.stdout;
+            const out_hash = try hash_mod.sha256HexAlloc(a, result_content);
+            try tool_output_hashes.append(out_hash);
 
             try messages.append(.{
                 .role = .tool,
@@ -504,6 +557,19 @@ pub fn runLoop(
     return .{
         .content = try a.dupe(u8, "Agent reached maximum number of turns without completing."),
         .turns = max_agent_turns,
+        .attestation = try finalizeAttestation(
+            a,
+            io,
+            run_cfg,
+            request_id,
+            b.prompt_hash_hex,
+            ts_start_ms,
+            decision_log.nowUnixMs(io),
+            ledger_enabled,
+            &ledger,
+            tool_args_hashes.items,
+            tool_output_hashes.items,
+        ),
     };
 }
 
@@ -754,6 +820,7 @@ fn handleDelegateToolCall(
     active_agent: ActiveAgent,
     args_json: []const u8,
     opts: RunOptions,
+    ledger: ?*att_ledger.MerkleTree,
 ) ![]u8 {
     const profile = active_agent.profile orelse return error.DelegateNotAllowed;
     if (profile.delegate_to.len == 0) return error.DelegateNotAllowed;
@@ -781,7 +848,7 @@ fn handleDelegateToolCall(
         if (token.allow_network) "true" else "false",
     });
     defer a.free(token_reason);
-    decisions.log(a, .{
+    decisions.logAndRecord(a, .{
         .ts_unix_ms = decision_log.nowUnixMs(io),
         .request_id = request_id,
         .prompt_hash = prompt_hash,
@@ -790,7 +857,7 @@ fn handleDelegateToolCall(
         .allowed = true,
         .reason = token_reason,
         .policy_hash = parent_cfg.policy.policyHash(),
-    });
+    }, ledger);
 
     var child_opts = opts;
     child_opts.interactive = false;
@@ -860,6 +927,43 @@ fn cfgForAgent(
         out.policy = try policy_mod.Policy.attenuate(a, out.policy, token.*);
     }
     return out;
+}
+
+fn finalizeAttestation(
+    a: std.mem.Allocator,
+    io: std.Io,
+    cfg: config.ValidatedConfig,
+    request_id: []const u8,
+    prompt_hash: ?[]const u8,
+    ts_start_ms: i64,
+    ts_end_ms: i64,
+    enabled: bool,
+    ledger: *const att_ledger.MerkleTree,
+    tool_args_hashes: []const []const u8,
+    tool_output_hashes: []const []const u8,
+) !?Attestation {
+    if (!enabled) return null;
+
+    var receipt = try att_receipt.buildFromLedger(
+        a,
+        request_id,
+        cfg.policy.policyHash(),
+        prompt_hash,
+        ts_start_ms,
+        ts_end_ms,
+        ledger,
+        tool_args_hashes,
+        tool_output_hashes,
+    );
+    defer receipt.deinit(a);
+
+    const path = try att_receipt.writeReceiptFile(a, io, cfg.raw.security.workspace_root, receipt);
+    defer a.free(path);
+
+    return .{
+        .merkle_root_hex = receipt.merkle_root_hex,
+        .event_count = receipt.event_count,
+    };
 }
 
 /// Write a formatted line to stderr (best-effort, for --verbose output).

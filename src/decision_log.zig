@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config.zig");
+const ledger_mod = @import("attestation/ledger.zig");
 
 pub const DecisionEvent = struct {
     ts_unix_ms: i64,
@@ -42,6 +43,25 @@ pub const Logger = struct {
         };
         defer a.free(line);
 
+        appendLineBestEffort(self, a, line);
+    }
+
+    pub fn logAndRecord(self: Logger, a: std.mem.Allocator, ev: DecisionEvent, ledger: ?*ledger_mod.MerkleTree) void {
+        if (!self.enabled and ledger == null) return;
+
+        const line = buildEventLine(a, ev) catch |e| {
+            std.log.err("decision_log: failed to build log line: {s}", .{@errorName(e)});
+            return;
+        };
+        defer a.free(line);
+
+        if (ledger) |l| {
+            // Merkle leaves are based on the serialized JSON object bytes (without trailing newline).
+            const leaf_line = if (line.len > 0 and line[line.len - 1] == '\n') line[0 .. line.len - 1] else line;
+            _ = l.addLeaf(leaf_line) catch {};
+        }
+
+        if (!self.enabled) return;
         appendLineBestEffort(self, a, line);
     }
 };

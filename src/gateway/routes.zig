@@ -7,6 +7,7 @@ const tools_rt = @import("../tools/manifest_runtime.zig");
 const agent_loop = @import("../agent/loop.zig");
 const queue_worker = @import("../queue/worker.zig");
 const decision_log = @import("../decision_log.zig");
+const att_receipt = @import("../attestation/receipt.zig");
 const tasks = @import("../primitives/tasks.zig");
 
 const rate_bucket_count: usize = 128;
@@ -312,7 +313,26 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         };
         defer result.deinit(a);
 
-        const body = try jsonObj(a, .{ .request_id = request_id, .content = result.content, .turns = result.turns });
+        const body = if (result.attestation) |att|
+            try jsonObj(a, .{
+                .request_id = request_id,
+                .content = result.content,
+                .turns = result.turns,
+                .merkle_root = att.merkle_root_hex[0..],
+                .event_count = att.event_count,
+            })
+        else
+            try jsonObj(a, .{ .request_id = request_id, .content = result.content, .turns = result.turns });
+        return .{ .status = 200, .body = body };
+    }
+
+    if (std.mem.eql(u8, req.method, "GET") and std.mem.startsWith(u8, path, "/v1/receipts/")) {
+        const rid = path["/v1/receipts/".len..];
+        if (rid.len == 0) return try jsonError(a, 400, request_id, "request id required");
+        const body = att_receipt.readReceiptJsonAlloc(a, io, cfg.raw.security.workspace_root, rid) catch |e| switch (e) {
+            error.FileNotFound => return jsonError(a, 404, request_id, @errorName(e)),
+            else => return jsonError(a, 500, request_id, @errorName(e)),
+        };
         return .{ .status = 200, .body = body };
     }
 

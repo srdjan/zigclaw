@@ -542,6 +542,51 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "attest")) {
+        const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+        var validated = try app.loadConfig(cfg_path);
+        defer validated.deinit(a);
+
+        if (argv.len >= 3 and std.mem.eql(u8, argv[2], "verify")) {
+            const rid = flagValue(argv, "--request-id") orelse return error.InvalidArgs;
+            const event_index_s = flagValue(argv, "--event-index") orelse return error.InvalidArgs;
+            const event_index = try std.fmt.parseInt(usize, event_index_s, 10);
+
+            const receipt_json = try @import("attestation/receipt.zig").readReceiptJsonAlloc(
+                a,
+                io,
+                validated.raw.security.workspace_root,
+                rid,
+            );
+            defer a.free(receipt_json);
+
+            const out = try @import("attestation/receipt.zig").verifyEventFromReceiptJsonAlloc(a, receipt_json, event_index);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
+        if (argv.len < 3) return error.InvalidArgs;
+        const rid = argv[2];
+        const receipt_json = try @import("attestation/receipt.zig").readReceiptJsonAlloc(
+            a,
+            io,
+            validated.raw.security.workspace_root,
+            rid,
+        );
+        defer a.free(receipt_json);
+
+        var obuf: [4096]u8 = undefined;
+        var ow = std.Io.File.stdout().writer(io, &obuf);
+        try ow.interface.print("{s}\n", .{receipt_json});
+        try ow.flush();
+        return;
+    }
+
     if (std.mem.eql(u8, cmd, "gateway")) {
         const sub: []const u8 = if (argv.len >= 3) argv[2] else "start";
         if (!std.mem.eql(u8, sub, "start")) {
@@ -717,6 +762,7 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
     dir.createDirPath(io, ".zigclaw/memory/people") catch {};
     dir.createDirPath(io, ".zigclaw/memory/templates") catch {};
     dir.createDirPath(io, ".zigclaw/logs") catch {};
+    dir.createDirPath(io, ".zigclaw/receipts") catch {};
     dir.createDirPath(io, ".zigclaw/queue/incoming") catch {};
     dir.createDirPath(io, ".zigclaw/queue/processing") catch {};
     dir.createDirPath(io, ".zigclaw/queue/outgoing") catch {};
@@ -769,6 +815,8 @@ fn usage(io: std.Io) !void {
         \\  zigclaw config validate [--config zigclaw.toml] [--format toml|text]
         \\  zigclaw policy hash [--config zigclaw.toml]
         \\  zigclaw policy explain (--tool <name> | --mount <path> | --command "cmd") [--config zigclaw.toml]
+        \\  zigclaw attest <request_id> [--config zigclaw.toml]
+        \\  zigclaw attest verify --request-id <id> --event-index <n> [--config zigclaw.toml]
         \\  zigclaw gateway start [--bind 127.0.0.1] [--port 8787] [--config zigclaw.toml]
         \\
     );

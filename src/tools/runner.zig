@@ -8,6 +8,7 @@ const obs = @import("../obs/logger.zig");
 const trace = @import("../obs/trace.zig");
 const hash = @import("../obs/hash.zig");
 const decision_log = @import("../decision_log.zig");
+const ledger_mod = @import("../attestation/ledger.zig");
 
 pub const ToolRunResult = struct {
     request_id: []u8,
@@ -57,6 +58,7 @@ pub const ToolRunResult = struct {
 
 pub const RunMeta = struct {
     prompt_hash: ?[]const u8 = null,
+    ledger: ?*ledger_mod.MerkleTree = null,
 };
 
 pub fn run(
@@ -83,7 +85,7 @@ pub fn run(
         .policy_hash = cfg.policy.policyHash(),
     });
 
-    decisions.log(a, .{
+    decisions.logAndRecord(a, .{
         .ts_unix_ms = decision_log.nowUnixMs(io),
         .request_id = request_id,
         .prompt_hash = meta.prompt_hash,
@@ -92,7 +94,7 @@ pub fn run(
         .allowed = allowed,
         .reason = if (allowed) "allowed by capability preset" else "denied: tool not in capability preset",
         .policy_hash = cfg.policy.policyHash(),
-    });
+    }, meta.ledger);
 
     if (!allowed) return error.ToolNotAllowed;
 
@@ -106,7 +108,7 @@ pub fn run(
     // Fail-closed: tool requiring network must be explicitly allowed (capability preset allow_network=true)
     if (m.requires_network) {
         const network_allowed = cfg.policy.active.allow_network;
-        decisions.log(a, .{
+        decisions.logAndRecord(a, .{
             .ts_unix_ms = decision_log.nowUnixMs(io),
             .request_id = request_id,
             .prompt_hash = meta.prompt_hash,
@@ -115,7 +117,7 @@ pub fn run(
             .allowed = network_allowed,
             .reason = if (network_allowed) "allowed: preset permits network" else "denied: tool requires network but preset disallows it",
             .policy_hash = cfg.policy.policyHash(),
-        });
+        }, meta.ledger);
         if (!network_allowed) return error.ToolNetworkNotAllowed;
     }
 

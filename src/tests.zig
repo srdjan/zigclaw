@@ -6,6 +6,7 @@ const pairing = @import("security/pairing.zig");
 const config = @import("config.zig");
 const policy_mod = @import("policy.zig");
 const token_mod = @import("policy/token.zig");
+const att_receipt = @import("attestation/receipt.zig");
 const queue_worker = @import("queue/worker.zig");
 
 // Helper: create a threaded Io suitable for tests that need file/network access.
@@ -1371,6 +1372,69 @@ test "gateway queue metrics route returns queue counts" {
     try std.testing.expect(incoming_total_v.integer >= 1);
 }
 
+test "gateway agent response includes attestation and receipts endpoint returns receipt" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const ws_dir = "tests/.tmp_gateway_receipts";
+    std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, ws_dir);
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.security.workspace_root = ws_dir;
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    const token = "tok_gateway_receipts";
+    var req_agent = try makeGatewayRequest(a, "POST", "/v1/agent", token, "{\"message\":\"hello attestation\"}");
+    defer req_agent.deinit(a);
+    var resp_agent = try gw_routes.handle(a, io, &app, vcq, req_agent, token, "http_req_att_1");
+    defer resp_agent.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_agent.status);
+
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_agent.body, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const root = obj.get("merkle_root") orelse return error.BadGolden;
+        try std.testing.expect(root == .string);
+        try std.testing.expectEqual(@as(usize, 64), root.string.len);
+        const events = obj.get("event_count") orelse return error.BadGolden;
+        try std.testing.expect(events == .integer);
+        try std.testing.expect(events.integer > 0);
+    }
+
+    var req_receipt = try makeGatewayRequest(a, "GET", "/v1/receipts/http_req_att_1", token, "");
+    defer req_receipt.deinit(a);
+    var resp_receipt = try gw_routes.handle(a, io, &app, vcq, req_receipt, token, "http_req_att_2");
+    defer resp_receipt.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_receipt.status);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_receipt.body, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const rid = obj.get("request_id") orelse return error.BadGolden;
+        try std.testing.expect(rid == .string);
+        try std.testing.expectEqualStrings("http_req_att_1", rid.string);
+    }
+}
+
 test "primitive task add/list/done lifecycle works" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -1964,6 +2028,60 @@ test "decision log includes provider and memory categories" {
     try std.testing.expect(has_provider_network);
     try std.testing.expect(has_provider_select);
     try std.testing.expect(saw_prompt_hash);
+}
+
+test "runLoop writes execution receipt and verify succeeds for event index" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const ws_dir = "tests/.tmp_receipt_verify";
+    std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, ws_dir);
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.logging.enabled = false;
+    vcq.raw.security.workspace_root = ws_dir;
+
+    var res = try agent_loop.runLoop(a, io, vcq, "hello receipt", "req_receipt_1", .{});
+    defer res.deinit(a);
+    try std.testing.expect(res.attestation != null);
+    try std.testing.expect(res.attestation.?.event_count > 0);
+
+    const receipt_json = try att_receipt.readReceiptJsonAlloc(a, io, ws_dir, "req_receipt_1");
+    defer a.free(receipt_json);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, receipt_json, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const root = obj.get("merkle_root_hex") orelse return error.BadGolden;
+        try std.testing.expect(root == .string);
+        try std.testing.expectEqual(@as(usize, 64), root.string.len);
+    }
+
+    const verify_json = try att_receipt.verifyEventFromReceiptJsonAlloc(a, receipt_json, 0);
+    defer a.free(verify_json);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, verify_json, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const valid = obj.get("valid") orelse return error.BadGolden;
+        try std.testing.expect(valid == .bool and valid.bool);
+    }
 }
 
 // ---- recall.zig tests ----

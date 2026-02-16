@@ -32,6 +32,7 @@ allow_write_paths = []
   - allowed tool set
   - mount mapping behavior
   - stable `policy hash`
+- Delegated child runs are attenuated by capability tokens (`src/policy/token.zig`, `src/agent/loop.zig`) to enforce least-privilege subsets.
 - If `active_preset` is missing or unknown, policy falls back to first configured preset.
 
 ## Enforcement Points

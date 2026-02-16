@@ -31,7 +31,7 @@ zig-out/bin/zigclaw gateway start --bind 127.0.0.1 --port 8787 --config zigclaw.
   - `200` -> `{ "request_id": "...", "result_json": "{...}" }`
 - `POST /v1/agent`
   - body: `{ "message": "..." }`
-  - `200` -> `{ "request_id": "...", "content": "...", "turns": N }`
+  - `200` -> `{ "request_id": "...", "content": "...", "turns": N, "merkle_root"?: "...", "event_count"?: N }`
 - `POST /v1/agent/enqueue`
   - body: `{ "message": "...", "request_id"?: "...", "agent_id"?: "..." }`
   - `202` -> `{ "request_id": "...", "queued": true }`
@@ -44,6 +44,12 @@ zig-out/bin/zigclaw gateway start --bind 127.0.0.1 --port 8787 --config zigclaw.
   - `200` -> cancel result JSON
 - `GET /v1/queue/metrics`
   - `200` -> queue metric counters
+- `GET /v1/receipts/<request_id>`
+  - `200` -> attestation receipt JSON
+  - `404` -> `{ "request_id": "...", "error": "FileNotFound" }`
+- `GET /v1/capsules/<request_id>`
+  - `200` -> replay capsule JSON
+  - `404` -> `{ "request_id": "...", "error": "FileNotFound" }`
 
 All responses include `x-request-id` header.
 

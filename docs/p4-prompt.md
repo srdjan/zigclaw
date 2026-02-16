@@ -25,6 +25,7 @@
   - `[orchestration]` + `[agents.<id>]`
   - per-agent capability preset
   - built-in `delegate_agent` tool when `delegate_to` is configured
+  - delegation capability-token attenuation for child runs (`src/policy/token.zig`)
 
 ## Partial/Scaffolded
 - Max turns and delegation depth are fixed constants in code (`max_agent_turns = 10`, default max delegate depth `3`), not config-driven.

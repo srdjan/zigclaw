@@ -256,10 +256,13 @@ model = "gpt-4.1-mini"
 temperature = 0.2
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+# optional vault key name (prompts for passphrase on use)
+# api_key_vault = "openai_api_key"
 
 [providers.fixtures]
-mode = "off"               # "off" | "record" | "replay"
+mode = "off"               # "off" | "record" | "replay" | "capsule_replay"
 dir = "./.zigclaw/fixtures"
+capsule_path = ""          # required when mode = "capsule_replay"
 
 [providers.reliable]
 retries = 0
@@ -268,10 +271,25 @@ backoff_ms = 250
 
 The `stub` provider returns canned responses without network access - useful for
 development and testing. `openai_compat` calls an OpenAI-compatible API. The API key
-is read from the environment variable named in `api_key_env`.
+resolution order is: inline `api_key`, then vault key `api_key_vault`, then env var
+named in `api_key_env`.
 
 The fixtures wrapper records or replays provider responses for deterministic testing.
 The reliable wrapper retries failed provider calls with exponential backoff.
+
+### Attestation and Replay
+
+```toml
+[attestation]
+enabled = false
+
+[replay]
+enabled = false
+```
+
+When attestation is enabled, runs emit Merkle-based receipts under
+`.zigclaw/receipts/<request_id>.json`. When replay is enabled, runs emit replay
+capsules under `.zigclaw/capsules/<request_id>.json`.
 
 ### Security
 

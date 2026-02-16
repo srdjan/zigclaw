@@ -6,6 +6,9 @@ This document reflects the current implementation in `src/`.
 
 ## Implemented
 - CLI entrypoint and command router: `src/main.zig`
+- Interactive setup wizard and prompts: `src/setup/*.zig`
+- Binary self-update flow (`check` + atomic replace): `src/update/*.zig`
+- Encrypted vault storage for secrets: `src/vault/*.zig`
 - Config parse/normalize/validate pipeline: `src/config.zig`
 - Compiled policy + policy hash + explain APIs: `src/policy.zig`
 - Agent loop (multi-turn, tool calls, delegation): `src/agent/loop.zig`
@@ -14,6 +17,9 @@ This document reflects the current implementation in `src/`.
 - Tool subsystem (manifest loading, schema validation, protocol runner): `src/tools/*.zig`
 - Queue worker and file-backed durable queue: `src/queue/worker.zig`
 - HTTP gateway with token auth and queue/tool/agent routes: `src/gateway/*.zig`
+- Audit reporting and receipt verification commands: `src/audit/*.zig`
+- Attestation receipt generation and verification: `src/attestation/*.zig`
+- Replay capsule capture/replay/diff: `src/replay/*.zig`
 - Primitive task/template system with markdown+YAML schema contracts: `src/primitives/tasks.zig`
 - Git-backed persistence lifecycle (`init`, `status`, `sync`): `src/persistence/git_sync.zig`
 - Observability and decision logging: `src/obs/logger.zig`, `src/decision_log.zig`
@@ -33,6 +39,7 @@ This document reflects the current implementation in `src/`.
 ## Provider boundary
 - Provider selection and wrappers are built from config in `src/providers/factory.zig`.
 - `openai_compat` provider is implemented via `curl` subprocess (`src/providers/openai_compat.zig`).
+- API key resolution supports inline secret, vault-backed key lookup, and env var fallback.
 
 ## Queue boundary
 - Queue persistence is filesystem-based (`incoming`, `processing`, `outgoing`, `canceled`, `cancel_requests`).
@@ -43,6 +50,12 @@ This document reflects the current implementation in `src/`.
 - Token auth using bearer token from `<workspace_root>/.zigclaw/gateway.token`.
 - Request-size and optional rate-limit checks happen before auth-protected route handling.
 - `POST /v1/events` can convert event payloads into primitive tasks with idempotency support.
+- `GET /v1/receipts/<request_id>` and `GET /v1/capsules/<request_id>` expose attestation/replay artifacts.
+
+## Attestation and Replay boundary
+- Attestation receipts are stored at `<workspace_root>/.zigclaw/receipts/<request_id>.json`.
+- Replay capsules are stored at `<workspace_root>/.zigclaw/capsules/<request_id>.json`.
+- Replay run executes through `capsule_replay` provider mode to avoid re-running tools.
 
 ## Build and Deploy Model
 

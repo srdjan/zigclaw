@@ -10,6 +10,10 @@
 - Decision/audit JSONL log sink (`src/decision_log.zig`) with rotation:
   - default file: `decisions.jsonl`
   - configured by `[logging]`
+- Optional attestation receipt artifacts (`src/attestation/receipt.zig`):
+  - `<workspace_root>/.zigclaw/receipts/<request_id>.json`
+- Optional replay capsule artifacts (`src/replay/recorder.zig`):
+  - `<workspace_root>/.zigclaw/capsules/<request_id>.json`
 
 ## Observability Events
 
@@ -34,6 +38,7 @@ Each event line includes:
 - `provider.network`, `provider.select`, `provider.fixtures`, `provider.reliable`
 - `memory.backend`, `memory.recall`
 - `gateway.request_bytes`, `gateway.auth`, `gateway.throttle`
+- `delegation.token.mint`, `delegation.token.expired`, `delegation.token.turns_exhausted`
 
 Each line includes:
 - `ts_unix_ms`, `request_id`, `prompt_hash`, `decision`, `subject`, `allowed`, `reason`, `policy_hash`

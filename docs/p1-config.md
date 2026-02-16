@@ -14,6 +14,7 @@
   - `zigclaw config validate --format toml` (stable normalized TOML)
   - `zigclaw config validate --format text` (human-readable summary)
 - Secret handling: `providers.primary.api_key` can be parsed, but normalized TOML omits it.
+- Vault-backed secret references are supported via `vault_path` and `providers.primary.api_key_vault`.
 - Basic value guards/clamps:
   - `queue.retry_jitter_pct > 100` -> clamped to `100` with warning
   - `gateway.rate_limit_window_ms == 0` -> clamped to `1` with warning
@@ -31,10 +32,13 @@
 
 Current typed schema in `src/config.zig` includes:
 - `config_version`
+- `vault_path`
 - `[capabilities]`, `[capabilities.presets.<name>]`
 - `[orchestration]`, `[agents.<id>]`
 - `[observability]`
 - `[logging]`
+- `[attestation]`
+- `[replay]`
 - `[gateway]`
 - `[security]`
 - `[providers.primary]`
@@ -43,6 +47,7 @@ Current typed schema in `src/config.zig` includes:
 - `[memory]`
 - `[memory.primitives]`
 - `[tools]`
+- `[tools.registry]`
 - `[queue]`
 - `[automation]`
 - `[persistence.git]`

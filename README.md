@@ -4,8 +4,10 @@ ZigClaw is a local-first Zig agent runtime with:
 - config-driven capability presets and compiled policy hash
 - tool execution via plugin manifests (WASI plugins and native plugins)
 - provider abstraction (`stub`, `openai_compat`) with fixture and retry wrappers
+- setup wizard, encrypted vault secrets, and in-place self-update command
 - queue worker mode and local HTTP gateway
 - JSONL observability + decision/audit logs
+- tamper-evident execution receipts and replay capsules
 
 Reference project: TinyClaw by `jlia0` (`https://github.com/jlia0/tinyclaw`).
 Original inspiration: `zeroclaw`.
@@ -15,8 +17,10 @@ This README reflects the current implementation in `src/`.
 ## Requirements
 - Zig (project currently builds/tests with Zig 0.14-era std APIs)
 - `wasmtime` in `PATH` for WASI tools (`native = false` manifests)
+- `git` in `PATH` for `zigclaw git init|status|sync`
 - `curl` in `PATH` for:
   - `openai_compat` provider
+  - `zigclaw update` manifest/binary fetch
   - `http_fetch` native plugin
 
 ## Quickstart
@@ -51,6 +55,13 @@ zig-out/bin/zigclaw agent --interactive --config zigclaw.toml
 Command list is taken from `src/main.zig:usage()`.
 
 ```text
+zigclaw version
+zigclaw setup
+zigclaw update [--check] [--url <manifest-url>]
+zigclaw vault set <name> [--vault <path>]
+zigclaw vault get <name> [--vault <path>]
+zigclaw vault list [--vault <path>]
+zigclaw vault delete <name> [--vault <path>]
 zigclaw init
 zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml]
 zigclaw prompt dump --message "..." [--format json|text] [--out path] [--config zigclaw.toml]
@@ -76,6 +87,14 @@ zigclaw queue metrics [--config zigclaw.toml]
 zigclaw config validate [--config zigclaw.toml] [--format toml|text]
 zigclaw policy hash [--config zigclaw.toml]
 zigclaw policy explain (--tool <name> | --mount <path> | --command "cmd") [--config zigclaw.toml]
+zigclaw audit report [--request-id <id>] [--from <ts>] [--to <ts>] [--format text|json] [--config zigclaw.toml]
+zigclaw audit verify --request-id <id> [--format text|json] [--config zigclaw.toml]
+zigclaw audit summary [--from <ts>] [--to <ts>] [--format text|json] [--config zigclaw.toml]
+zigclaw attest <request_id> [--config zigclaw.toml]
+zigclaw attest verify --request-id <id> --event-index <n> [--config zigclaw.toml]
+zigclaw replay capture --request-id <id> [--config zigclaw.toml]
+zigclaw replay run --capsule <path> [--config zigclaw.toml]
+zigclaw replay diff --a <path1> --b <path2>
 zigclaw gateway start [--bind 127.0.0.1] [--port 8787] [--config zigclaw.toml]
 ```
 
@@ -91,6 +110,7 @@ Normalized output is stable and omits `providers.primary.api_key`.
 Canonical normalized example (matches `tests/golden/config_normalized.toml`):
 ```toml
 config_version = 1
+vault_path = "./.zigclaw/vault.enc"
 
 [capabilities]
 active_preset = "dev"
@@ -118,6 +138,12 @@ file = "decisions.jsonl"
 max_file_bytes = 1048576
 max_files = 5
 
+[attestation]
+enabled = false
+
+[replay]
+enabled = false
+
 [gateway]
 rate_limit_enabled = false
 rate_limit_store = "memory"
@@ -139,6 +165,7 @@ api_key_env = "OPENAI_API_KEY"
 [providers.fixtures]
 mode = "off"
 dir = "./.zigclaw/fixtures"
+capsule_path = ""
 
 [providers.reliable]
 retries = 0
@@ -156,6 +183,9 @@ strict_schema = true
 [tools]
 wasmtime_path = "wasmtime"
 plugin_dir = "./zig-out/bin"
+
+[tools.registry]
+strict = false
 
 [queue]
 dir = "./.zigclaw/queue"
@@ -224,6 +254,7 @@ zig-out/bin/zigclaw prompt diff --a /tmp/prompt_a.txt --b /tmp/prompt_b.txt
 ```
 
 Agent orchestration supports optional static profiles (`[orchestration]`, `[agents.<id>]`) and a built-in `delegate_agent` tool when `delegate_to` is configured.
+Delegated child runs are attenuated with capability tokens (tool/write-path/network narrowing + optional turn/expiry constraints).
 
 ## Providers
 
@@ -235,17 +266,58 @@ model = "gpt-4.1-mini"
 temperature = 0.2
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+# optional vault-backed secret lookup
+# api_key_vault = "openai_api_key"
 ```
 
 Fixture/retry wrappers:
 ```toml
 [providers.fixtures]
-mode = "off" # "off" | "record" | "replay"
+mode = "off" # "off" | "record" | "replay" | "capsule_replay"
 dir = "./.zigclaw/fixtures"
+capsule_path = "" # required when mode = "capsule_replay"
 
 [providers.reliable]
 retries = 2
 backoff_ms = 250
+```
+
+`openai_compat` API key resolution order is: `providers.primary.api_key` -> vault key `providers.primary.api_key_vault` -> env var `providers.primary.api_key_env`.
+
+## Setup, Vault, Audit, Attestation, Replay, Update
+
+Interactive setup wizard:
+```sh
+zig-out/bin/zigclaw setup
+```
+
+Encrypted vault secret management:
+```sh
+zig-out/bin/zigclaw vault set openai_api_key --vault ./.zigclaw/vault.enc
+zig-out/bin/zigclaw vault get openai_api_key --vault ./.zigclaw/vault.enc
+zig-out/bin/zigclaw vault list --vault ./.zigclaw/vault.enc
+zig-out/bin/zigclaw vault delete openai_api_key --vault ./.zigclaw/vault.enc
+```
+
+Audit/reporting and receipt verification:
+```sh
+zig-out/bin/zigclaw audit report --request-id req_demo_1 --format text --config zigclaw.toml
+zig-out/bin/zigclaw audit verify --request-id req_demo_1 --format json --config zigclaw.toml
+zig-out/bin/zigclaw attest req_demo_1 --config zigclaw.toml
+zig-out/bin/zigclaw attest verify --request-id req_demo_1 --event-index 0 --config zigclaw.toml
+```
+
+Replay capture/run/diff:
+```sh
+zig-out/bin/zigclaw replay capture --request-id req_demo_1 --config zigclaw.toml
+zig-out/bin/zigclaw replay run --capsule ./.zigclaw/capsules/req_demo_1.json --config zigclaw.toml
+zig-out/bin/zigclaw replay diff --a capsule_a.json --b capsule_b.json
+```
+
+Self-update:
+```sh
+zig-out/bin/zigclaw update --check
+zig-out/bin/zigclaw update
 ```
 
 ## Queue
@@ -294,6 +366,8 @@ On startup, gateway prints bearer token and token file path (`<workspace_root>/.
 
 Additional trigger-style endpoint:
 - `POST /v1/events` creates/updates primitive tasks from event payloads (`title`/`message`, `priority`, `owner`, `project`, `tags`, optional `idempotency_key`).
+- `GET /v1/receipts/<request_id>` returns attestation receipt JSON (when present).
+- `GET /v1/capsules/<request_id>` returns replay capsule JSON (when present).
 
 Health endpoint (no auth):
 ```sh
@@ -309,9 +383,12 @@ curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/tools/echo
 curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"tool":"echo","args":{"text":"hi"}}' \
   http://127.0.0.1:8787/v1/tools/run
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/receipts/req_demo_1
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/capsules/req_demo_1
 ```
 
 Note: some gateway responses intentionally return embedded JSON as strings (`tools_json`, `manifest_json`, `result_json`).
+`POST /v1/agent` responses include `merkle_root` and `event_count` when `[attestation].enabled = true`.
 
 ## Observability and Audit Logs
 
@@ -321,10 +398,16 @@ Operational events (`[observability]`) are written to:
 Policy/decision audit events (`[logging]`) are written to:
 - `<workspace_root>/<logging.dir>/<logging.file>`
 
+Attestation receipts are written to:
+- `<workspace_root>/.zigclaw/receipts/<request_id>.json` (when `[attestation].enabled = true`)
+
+Replay capsules are written to:
+- `<workspace_root>/.zigclaw/capsules/<request_id>.json` (when `[replay].enabled = true`)
+
 Both sinks support size-based rotation.
 
 ## Project Layout
-- `src/`: core runtime (`config`, `policy`, `agent`, `providers`, `tools`, `queue`, `gateway`)
+- `src/`: core runtime (`config`, `policy`, `agent`, `providers`, `tools`, `queue`, `gateway`, `attestation`, `replay`, `vault`, `update`)
 - `plugins/`: example tools + SDK
 - `docs/`: implementation-phase and architecture docs
 - `tests/`: golden files and fixtures

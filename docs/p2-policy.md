@@ -5,6 +5,7 @@
 ## Implemented
 - Policy compilation from config capability presets (`src/policy.zig`).
 - Stable `policy hash` generation (SHA-256 over canonicalized policy inputs).
+- Delegation capability tokens for least-privilege child runs (`src/policy/token.zig`).
 - CLI policy inspection:
   - `zigclaw policy hash`
   - `zigclaw policy explain --tool <name>`
@@ -24,6 +25,7 @@
 - Provider policy: `provider.network`, `provider.select`, `provider.fixtures`, `provider.reliable`
 - Memory policy: `memory.backend`, `memory.recall`
 - Gateway policy: `gateway.request_bytes`, `gateway.auth`, `gateway.throttle`
+- Delegation token policy: `delegation.token.mint`, `delegation.token.expired`, `delegation.token.turns_exhausted`
 
 Each decision event includes:
 - `ts_unix_ms`

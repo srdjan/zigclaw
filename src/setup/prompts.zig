@@ -1,7 +1,6 @@
 const std = @import("std");
 
 pub fn readLine(io: std.Io, prompt: []const u8, buf: []u8) ![]const u8 {
-    _ = buf;
     var obuf: [1024]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
     try ow.interface.writeAll(prompt);
@@ -11,13 +10,17 @@ pub fn readLine(io: std.Io, prompt: []const u8, buf: []u8) ![]const u8 {
     var reader = std.Io.File.stdin().reader(io, &reader_buf);
     const line = reader.interface.takeDelimiter('\n') catch |e| switch (e) {
         error.StreamTooLong => {
-            _ = reader.interface.discardDelimiterInclusive('\n') catch return "";
-            return "";
+            _ = reader.interface.discardDelimiterInclusive('\n') catch return buf[0..0];
+            return buf[0..0];
         },
-        error.ReadFailed => return "",
+        error.ReadFailed => return buf[0..0],
     };
-    if (line == null) return "";
-    return std.mem.trim(u8, line.?, " \t\r\n");
+    if (line == null) return buf[0..0];
+    const trimmed = std.mem.trim(u8, line.?, " \t\r\n");
+    if (trimmed.len == 0) return buf[0..0];
+    if (trimmed.len > buf.len) return buf[0..0];
+    @memcpy(buf[0..trimmed.len], trimmed);
+    return buf[0..trimmed.len];
 }
 
 pub fn readChoice(io: std.Io, prompt: []const u8, options: []const []const u8) !usize {

@@ -91,7 +91,6 @@ pub fn decrypt(a: std.mem.Allocator, key: [key_len]u8, blob: []const u8) ![]u8 {
     errdefer a.free(plaintext);
 
     XChaCha20Poly1305.decrypt(plaintext, ct, tag, "", nonce, key) catch {
-        a.free(plaintext);
         return error.DecryptionFailed;
     };
 

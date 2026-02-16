@@ -3013,3 +3013,81 @@ test "parseChatCompletion handles length finish_reason" {
 
     try std.testing.expectEqual(providers.FinishReason.length, resp.finish_reason);
 }
+
+// ---- vault crypto round-trip tests ----
+
+const vault_crypto = @import("vault/crypto.zig");
+
+test "vault crypto encrypt-decrypt round-trip" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+    const ti = try makeTestIo(a);
+    defer destroyTestIo(a, ti.threaded);
+    const io = ti.io;
+
+    const passphrase = "testpassword123";
+    const plaintext = "{\"MY_KEY\":\"my-secret-value\"}";
+
+    // Generate salt and derive key
+    var salt: [vault_crypto.salt_len]u8 = undefined;
+    io.random(&salt);
+    var key = try vault_crypto.deriveKey(a, io, passphrase, salt);
+    defer vault_crypto.zeroize(&key);
+
+    // Encrypt
+    const blob = try vault_crypto.encrypt(a, io, key, salt, plaintext);
+    defer a.free(blob);
+
+    // Extract salt from blob and re-derive key (same as open does)
+    const extracted_salt = try vault_crypto.extractSalt(blob);
+    var key2 = try vault_crypto.deriveKey(a, io, passphrase, extracted_salt);
+    defer vault_crypto.zeroize(&key2);
+
+    // Keys should match
+    try std.testing.expectEqualSlices(u8, &key, &key2);
+
+    // Decrypt
+    const decrypted = try vault_crypto.decrypt(a, key2, blob);
+    defer {
+        vault_crypto.zeroize(decrypted);
+        a.free(decrypted);
+    }
+
+    try std.testing.expectEqualStrings(plaintext, decrypted);
+}
+
+const vault_mod = @import("vault/vault.zig");
+
+test "vault save and reopen from file" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+    const ti = try makeTestIo(a);
+    defer destroyTestIo(a, ti.threaded);
+    const io = ti.io;
+
+    const path = "/tmp/zigclaw-test-vault-roundtrip.enc";
+    const passphrase = "test-pass-42";
+
+    // Create and save
+    {
+        var v = vault_mod.Vault.init(a);
+        defer v.deinit();
+        try v.set("API_KEY", "sk-secret-123");
+        try v.set("DB_PASS", "hunter2");
+        try vault_mod.save(&v, a, io, path, passphrase);
+    }
+
+    // Reopen and verify
+    {
+        var v = try vault_mod.open(a, io, path, passphrase);
+        defer v.deinit();
+
+        const api_key = v.get("API_KEY") orelse return error.TestFailed;
+        try std.testing.expectEqualStrings("sk-secret-123", api_key);
+
+        const db_pass = v.get("DB_PASS") orelse return error.TestFailed;
+        try std.testing.expectEqualStrings("hunter2", db_pass);
+    }
+}

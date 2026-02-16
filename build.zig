@@ -1,9 +1,15 @@
 const std = @import("std");
 
+const version = "0.2.0";
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const host = b.graph.host;
+
+    // Build options module (version string available at comptime)
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", version);
 
     // Generate compile-time tool registry from plugin manifests.
     const registry_gen = b.addExecutable(.{
@@ -34,6 +40,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.root_module.addOptions("build_options", options);
     exe.step.dependOn(&run_registry_gen.step);
     b.installArtifact(exe);
 
@@ -51,6 +58,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    tests.root_module.addOptions("build_options", options);
     tests.step.dependOn(&run_registry_gen.step);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -171,4 +179,94 @@ pub fn build(b: *std.Build) void {
     s_all.dependOn(s3);
     s_all.dependOn(s4);
     s_all.dependOn(s5);
+
+    // --- Release cross-compilation targets
+    const release_step = b.step("release", "Cross-compile release binaries for all platforms");
+
+    const release_targets = [_]struct {
+        query: std.Target.Query,
+        name: []const u8,
+    }{
+        .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl }, .name = "x86_64-linux-musl" },
+        .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl }, .name = "aarch64-linux-musl" },
+        .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .macos }, .name = "x86_64-macos" },
+        .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .macos }, .name = "aarch64-macos" },
+    };
+
+    // WASI plugins are target-independent: build once
+    const wasi_release_sdk = b.createModule(.{
+        .root_source_file = b.path("plugins/sdk/protocol.zig"),
+    });
+
+    const wasi_plugins = [_]struct { name: []const u8, src: []const u8 }{
+        .{ .name = "echo.wasm", .src = "plugins/echo/src/main.zig" },
+        .{ .name = "fs_read.wasm", .src = "plugins/fs_read/src/main.zig" },
+        .{ .name = "fs_write.wasm", .src = "plugins/fs_write/src/main.zig" },
+    };
+
+    for (wasi_plugins) |wp| {
+        const wasi_exe = b.addExecutable(.{
+            .name = wp.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(wp.src),
+                .target = wasi_target,
+                .optimize = .ReleaseSafe,
+                .imports = &.{
+                    .{ .name = "plugin_sdk", .module = wasi_release_sdk },
+                },
+            }),
+        });
+        const install_wasi = b.addInstallArtifact(wasi_exe, .{
+            .dest_dir = .{ .override = .{ .custom = "release/wasi" } },
+        });
+        release_step.dependOn(&install_wasi.step);
+    }
+
+    // Per-target: zigclaw exe + native plugins
+    for (release_targets) |rt| {
+        const resolved = b.resolveTargetQuery(rt.query);
+
+        const rel_exe = b.addExecutable(.{
+            .name = "zigclaw",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = resolved,
+                .optimize = .ReleaseSafe,
+            }),
+        });
+        rel_exe.root_module.addOptions("build_options", options);
+        rel_exe.step.dependOn(&run_registry_gen.step);
+        const install_exe = b.addInstallArtifact(rel_exe, .{
+            .dest_dir = .{ .override = .{ .custom = b.fmt("release/{s}", .{rt.name}) } },
+        });
+        release_step.dependOn(&install_exe.step);
+
+        // Native plugins for this target
+        const rel_native_sdk = b.createModule(.{
+            .root_source_file = b.path("plugins/sdk/protocol.zig"),
+        });
+
+        const native_plugins = [_]struct { name: []const u8, src: []const u8 }{
+            .{ .name = "shell_exec", .src = "plugins/shell_exec/src/main.zig" },
+            .{ .name = "http_fetch", .src = "plugins/http_fetch/src/main.zig" },
+        };
+
+        for (native_plugins) |np| {
+            const rel_plugin = b.addExecutable(.{
+                .name = np.name,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(np.src),
+                    .target = resolved,
+                    .optimize = .ReleaseSafe,
+                    .imports = &.{
+                        .{ .name = "plugin_sdk", .module = rel_native_sdk },
+                    },
+                }),
+            });
+            const install_plugin = b.addInstallArtifact(rel_plugin, .{
+                .dest_dir = .{ .override = .{ .custom = b.fmt("release/{s}", .{rt.name}) } },
+            });
+            release_step.dependOn(&install_plugin.step);
+        }
+    }
 }

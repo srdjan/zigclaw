@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Build release binaries
+        run: zig build release
+
+      - name: Compute checksums and generate manifest
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          REPO="${GITHUB_REPOSITORY}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${GITHUB_REF_NAME}"
+
+          # Compute SHA-256 for each platform binary
+          declare -A SHAS
+          for dir in zig-out/release/x86_64-linux-musl zig-out/release/aarch64-linux-musl zig-out/release/x86_64-macos zig-out/release/aarch64-macos; do
+            PLATFORM=$(basename "$dir")
+            SHA=$(sha256sum "$dir/zigclaw" | awk '{print $1}')
+            SHAS[$PLATFORM]="$SHA"
+          done
+
+          # Generate latest.json
+          cat > zig-out/release/latest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "platforms": {
+              "x86_64-linux-musl": {
+                "url": "${BASE_URL}/zigclaw-x86_64-linux-musl",
+                "sha256": "${SHAS[x86_64-linux-musl]}"
+              },
+              "aarch64-linux-musl": {
+                "url": "${BASE_URL}/zigclaw-aarch64-linux-musl",
+                "sha256": "${SHAS[aarch64-linux-musl]}"
+              },
+              "x86_64-macos": {
+                "url": "${BASE_URL}/zigclaw-x86_64-macos",
+                "sha256": "${SHAS[x86_64-macos]}"
+              },
+              "aarch64-macos": {
+                "url": "${BASE_URL}/zigclaw-aarch64-macos",
+                "sha256": "${SHAS[aarch64-macos]}"
+              }
+            }
+          }
+          EOF
+
+          # Rename binaries for upload
+          for dir in zig-out/release/x86_64-linux-musl zig-out/release/aarch64-linux-musl zig-out/release/x86_64-macos zig-out/release/aarch64-macos; do
+            PLATFORM=$(basename "$dir")
+            cp "$dir/zigclaw" "zig-out/release/zigclaw-${PLATFORM}"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            zig-out/release/zigclaw-x86_64-linux-musl
+            zig-out/release/zigclaw-aarch64-linux-musl
+            zig-out/release/zigclaw-x86_64-macos
+            zig-out/release/zigclaw-aarch64-macos
+            zig-out/release/latest.json
+          generate_release_notes: true

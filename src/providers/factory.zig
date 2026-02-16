@@ -6,10 +6,12 @@ const replay = @import("replay.zig");
 const capsule_replay = @import("capsule_replay.zig");
 const recording = @import("recording.zig");
 const reliable = @import("reliable.zig");
+const vault_mod = @import("../vault/vault.zig");
+const vault_crypto = @import("../vault/crypto.zig");
 
 pub fn build(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig) !provider.Provider {
     // Base provider
-    var base = try buildBase(a, cfg.raw.provider_primary);
+    var base = try buildBase(a, io, cfg);
 
     // Wrap in fixtures (replay/record)
     switch (cfg.raw.provider_fixtures.mode) {
@@ -42,9 +44,32 @@ pub fn build(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig) !pro
     return base;
 }
 
-fn buildBase(a: std.mem.Allocator, p: config.ProviderConfig) !provider.Provider {
+fn buildBase(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig) !provider.Provider {
+    const p = cfg.raw.provider_primary;
     return switch (p.kind) {
         .stub => .{ .stub = .{} },
-        .openai_compat => .{ .openai_compat = try openai.OpenAiCompatProvider.init(a, p.base_url, p.api_key, p.api_key_env) },
+        .openai_compat => blk: {
+            // Resolve API key: inline > vault > env var
+            var api_key = p.api_key;
+            if (api_key.len == 0 and p.api_key_vault.len > 0) {
+                api_key = try resolveVaultKey(a, io, cfg.raw.vault_path, p.api_key_vault);
+            }
+            break :blk .{ .openai_compat = try openai.OpenAiCompatProvider.init(a, p.base_url, api_key, p.api_key_env) };
+        },
     };
+}
+
+fn resolveVaultKey(a: std.mem.Allocator, io: std.Io, vault_path: []const u8, key_name: []const u8) ![]const u8 {
+    const prompts = @import("../setup/prompts.zig");
+
+    // Read passphrase from stdin
+    var pass_buf: [256]u8 = undefined;
+    const passphrase = try prompts.readLine(io, "Vault passphrase: ", &pass_buf);
+    if (passphrase.len == 0) return error.VaultPassphraseRequired;
+
+    var v = try vault_mod.open(a, io, vault_path, passphrase);
+    defer v.deinit();
+
+    const value = v.get(key_name) orelse return error.VaultKeyNotFound;
+    return try a.dupe(u8, value);
 }

@@ -12,6 +12,7 @@ pub const ProviderConfig = struct {
 
     base_url: []const u8 = "https://api.openai.com/v1",
     api_key: []const u8 = "", // optional (can be empty); do not print in normalized config
+    api_key_vault: []const u8 = "", // vault key name for API key
     api_key_env: []const u8 = "OPENAI_API_KEY",
 };
 
@@ -160,6 +161,8 @@ pub const OrchestrationConfig = struct {
 pub const Config = struct {
     config_version: u32 = 1,
 
+    vault_path: []const u8 = "./.zigclaw/vault.enc",
+
     observability: ObservabilityConfig = .{},
     logging: LoggingConfig = .{},
     attestation: AttestationConfig = .{},
@@ -286,7 +289,13 @@ pub const ValidatedConfig = struct {
 
     pub fn printNormalizedToml(self: ValidatedConfig, a: std.mem.Allocator, w: *std.Io.Writer) !void {
         // Stable ordering output (minimal TOML). DO NOT print secrets.
-        try w.print("config_version = {d}\n\n", .{self.raw.config_version});
+        try w.print("config_version = {d}\n", .{self.raw.config_version});
+        if (self.raw.vault_path.len > 0) {
+            try w.writeAll("vault_path = ");
+            try writeTomlString(w, self.raw.vault_path);
+            try w.writeAll("\n");
+        }
+        try w.writeAll("\n");
 
         // [capabilities]
         try w.writeAll("[capabilities]\n");
@@ -412,6 +421,11 @@ pub const ValidatedConfig = struct {
         try w.writeAll("base_url = ");
         try writeTomlString(w, self.raw.provider_primary.base_url);
         try w.writeAll("\n");
+        if (self.raw.provider_primary.api_key_vault.len > 0) {
+            try w.writeAll("api_key_vault = ");
+            try writeTomlString(w, self.raw.provider_primary.api_key_vault);
+            try w.writeAll("\n");
+        }
         try w.writeAll("api_key_env = ");
         try writeTomlString(w, self.raw.provider_primary.api_key_env);
         try w.writeAll("\n\n");
@@ -525,6 +539,10 @@ pub fn loadAndValidate(a: std.mem.Allocator, io: std.Io, path: []const u8) !Vali
     errdefer built.deinit(a);
 
     return validate(a, built.cfg, built.warnings);
+}
+
+pub fn loadAndValidateFromConfig(a: std.mem.Allocator, cfg: Config) !ValidatedConfig {
+    return validate(a, cfg, &.{});
 }
 
 fn validate(a: std.mem.Allocator, cfg: Config, warnings: []Warning) !ValidatedConfig {
@@ -768,6 +786,11 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
             continue;
         }
 
+        if (std.mem.eql(u8, k, "vault_path")) {
+            cfg.vault_path = try coerceStringDup(a, v);
+            continue;
+        }
+
         if (std.mem.eql(u8, k, "capabilities.active_preset")) {
             cfg.capabilities.active_preset = try coerceStringDup(a, v);
             continue;
@@ -913,6 +936,10 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
         if (std.mem.eql(u8, k, "providers.primary.api_key")) {
             // allow inline api_key (discouraged). Keep it in cfg but never print it.
             cfg.provider_primary.api_key = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "providers.primary.api_key_vault")) {
+            cfg.provider_primary.api_key_vault = try coerceStringDup(a, v);
             continue;
         }
         if (std.mem.eql(u8, k, "providers.primary.api_key_env")) {
@@ -1439,6 +1466,7 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
 
     // Simple string fields - only free if pointer differs from compile-time default
     inline for (.{
+        .{ &cfg.vault_path, &d.vault_path },
         .{ &cfg.capabilities.active_preset, &d.capabilities.active_preset },
         .{ &cfg.observability.dir, &d.observability.dir },
         .{ &cfg.logging.dir, &d.logging.dir },
@@ -1451,6 +1479,7 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
         .{ &cfg.provider_primary.model, &d.provider_primary.model },
         .{ &cfg.provider_primary.base_url, &d.provider_primary.base_url },
         .{ &cfg.provider_primary.api_key, &d.provider_primary.api_key },
+        .{ &cfg.provider_primary.api_key_vault, &d.provider_primary.api_key_vault },
         .{ &cfg.provider_primary.api_key_env, &d.provider_primary.api_key_env },
         .{ &cfg.provider_fixtures.dir, &d.provider_fixtures.dir },
         .{ &cfg.provider_fixtures.capsule_path, &d.provider_fixtures.capsule_path },

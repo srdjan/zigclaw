@@ -1,4 +1,5 @@
 config_version = 1
+vault_path = "./.zigclaw/vault.enc"
 
 [capabilities]
 active_preset = "dev"

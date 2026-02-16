@@ -2617,6 +2617,78 @@ test "capsule diff reports first divergence between two runs" {
     }
 }
 
+test "capsule diff aligns by kind and turn (order-insensitive across kinds)" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const left =
+        \\{
+        \\  "events": [
+        \\    { "kind": "provider_request", "turn": 0, "payload": { "step": "req" } },
+        \\    { "kind": "provider_response", "turn": 0, "payload": { "step": "resp" } }
+        \\  ]
+        \\}
+    ;
+    const right =
+        \\{
+        \\  "events": [
+        \\    { "kind": "provider_response", "turn": 0, "payload": { "step": "resp" } },
+        \\    { "kind": "provider_request", "turn": 0, "payload": { "step": "req" } }
+        \\  ]
+        \\}
+    ;
+
+    const diff_json = try replay_diff.diffCapsulesJsonAlloc(a, left, right);
+    defer a.free(diff_json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, diff_json, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const obj = parsed.value.object;
+    const equal = obj.get("equal") orelse return error.BadGolden;
+    try std.testing.expect(equal == .bool and equal.bool);
+    const first = obj.get("first_diff_index") orelse return error.BadGolden;
+    try std.testing.expect(first == .null);
+}
+
+test "capsule diff compares payloads for aligned kind+turn events" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const left =
+        \\{
+        \\  "events": [
+        \\    { "kind": "tool_response", "turn": 1, "payload": { "ok": true, "content": "A" } }
+        \\  ]
+        \\}
+    ;
+    const right =
+        \\{
+        \\  "events": [
+        \\    { "kind": "tool_response", "turn": 1, "payload": { "ok": true, "content": "B" } }
+        \\  ]
+        \\}
+    ;
+
+    const diff_json = try replay_diff.diffCapsulesJsonAlloc(a, left, right);
+    defer a.free(diff_json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, diff_json, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const obj = parsed.value.object;
+    const equal = obj.get("equal") orelse return error.BadGolden;
+    try std.testing.expect(equal == .bool and !equal.bool);
+
+    const first = obj.get("first_diff_index") orelse return error.BadGolden;
+    try std.testing.expect(first == .integer);
+    const fd = obj.get("first_diff") orelse return error.BadGolden;
+    try std.testing.expect(fd == .object);
+    const kind = fd.object.get("kind") orelse return error.BadGolden;
+    try std.testing.expect(kind == .string);
+    try std.testing.expectEqualStrings("tool_response", kind.string);
+}
+
 // ---- recall.zig tests ----
 
 fn freeRecallItems(a: std.mem.Allocator, items: []recall.MemoryItem) void {

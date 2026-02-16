@@ -18,8 +18,283 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
+        const build_options = @import("build_options");
+        const builtin = @import("builtin");
+        var obuf: [256]u8 = undefined;
+        var ow = std.Io.File.stdout().writer(io, &obuf);
+        try ow.interface.print("zigclaw {s} ({s}-{s})\n", .{
+            build_options.version,
+            @tagName(builtin.cpu.arch),
+            @tagName(builtin.os.tag),
+        });
+        try ow.flush();
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "setup")) {
+        try @import("setup/wizard.zig").run(a, io);
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "update")) {
+        const check_only = hasFlag(argv, "--check");
+        const manifest_url = flagValue(argv, "--url") orelse "https://github.com/zigclaw/zigclaw/releases/latest/download/latest.json";
+        const updater = @import("update/updater.zig");
+
+        if (check_only) {
+            const result = updater.check(a, io, manifest_url) catch |e| {
+                var ebuf: [4096]u8 = undefined;
+                var ew = std.Io.File.stderr().writer(io, &ebuf);
+                try ew.interface.print("update check failed: {s}\n", .{@errorName(e)});
+                try ew.flush();
+                return;
+            };
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            if (result.update_available) {
+                try ow.interface.print("update available: {s} -> {s}\n", .{ result.current, result.latest });
+            } else {
+                try ow.interface.print("up to date: {s}\n", .{result.current});
+            }
+            try ow.flush();
+        } else {
+            const new_version = updater.update(a, io, manifest_url) catch |e| {
+                var ebuf: [4096]u8 = undefined;
+                var ew = std.Io.File.stderr().writer(io, &ebuf);
+                if (e == error.AlreadyUpToDate) {
+                    try ew.interface.print("already up to date: {s}\n", .{@import("build_options").version});
+                } else {
+                    try ew.interface.print("update failed: {s}\n", .{@errorName(e)});
+                }
+                try ew.flush();
+                return;
+            };
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("updated to {s}\n", .{new_version});
+            try ow.flush();
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "vault")) {
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
+        const vault_path = flagValue(argv, "--vault") orelse "./.zigclaw/vault.enc";
+        const vault_mod = @import("vault/vault.zig");
+        const prompts_mod = @import("setup/prompts.zig");
+
+        if (std.mem.eql(u8, sub, "set")) {
+            if (argv.len < 4) return error.InvalidArgs;
+            const name: []const u8 = argv[3];
+
+            var val_buf: [4096]u8 = undefined;
+            const value = try prompts_mod.readLine(io, "Value: ", &val_buf);
+            if (value.len == 0) return error.InvalidArgs;
+
+            var pass_buf: [256]u8 = undefined;
+            const passphrase = try prompts_mod.readLine(io, "Vault passphrase: ", &pass_buf);
+            if (passphrase.len == 0) return error.InvalidArgs;
+
+            var v = try vault_mod.open(a, io, vault_path, passphrase);
+            defer v.deinit();
+            try v.set(name, value);
+            try vault_mod.save(&v, a, io, vault_path, passphrase);
+
+            var obuf: [256]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("stored '{s}' in vault\n", .{name});
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "get")) {
+            if (argv.len < 4) return error.InvalidArgs;
+            const name: []const u8 = argv[3];
+
+            var pass_buf: [256]u8 = undefined;
+            const passphrase = try prompts_mod.readLine(io, "Vault passphrase: ", &pass_buf);
+            if (passphrase.len == 0) return error.InvalidArgs;
+
+            var v = try vault_mod.open(a, io, vault_path, passphrase);
+            defer v.deinit();
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            if (v.get(name)) |val| {
+                try ow.interface.print("{s}\n", .{val});
+            } else {
+                try ow.interface.print("key '{s}' not found\n", .{name});
+            }
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "list")) {
+            var pass_buf: [256]u8 = undefined;
+            const passphrase = try prompts_mod.readLine(io, "Vault passphrase: ", &pass_buf);
+            if (passphrase.len == 0) return error.InvalidArgs;
+
+            var v = try vault_mod.open(a, io, vault_path, passphrase);
+            defer v.deinit();
+
+            const names = try v.list(a);
+            defer {
+                for (names) |n| a.free(n);
+                a.free(names);
+            }
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            if (names.len == 0) {
+                try ow.interface.writeAll("(vault is empty)\n");
+            } else {
+                for (names) |n| {
+                    try ow.interface.print("{s}\n", .{n});
+                }
+            }
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "delete")) {
+            if (argv.len < 4) return error.InvalidArgs;
+            const name: []const u8 = argv[3];
+
+            var pass_buf: [256]u8 = undefined;
+            const passphrase = try prompts_mod.readLine(io, "Vault passphrase: ", &pass_buf);
+            if (passphrase.len == 0) return error.InvalidArgs;
+
+            var v = try vault_mod.open(a, io, vault_path, passphrase);
+            defer v.deinit();
+
+            var obuf: [256]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            if (v.delete(name)) {
+                try vault_mod.save(&v, a, io, vault_path, passphrase);
+                try ow.interface.print("deleted '{s}'\n", .{name});
+            } else {
+                try ow.interface.print("key '{s}' not found\n", .{name});
+            }
+            try ow.flush();
+            return;
+        }
+
+        try usage(io);
+        return;
+    }
+
     var app = try App.init(a, io);
     defer app.deinit();
+
+    if (std.mem.eql(u8, cmd, "audit")) {
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
+        const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+        var validated = try app.loadConfig(cfg_path);
+        defer validated.deinit(a);
+
+        const report_mod = @import("audit/report.zig");
+
+        if (std.mem.eql(u8, sub, "report")) {
+            const rid = flagValue(argv, "--request-id");
+            const from_ts = if (flagValue(argv, "--from")) |s| try std.fmt.parseInt(i64, s, 10) else null;
+            const to_ts = if (flagValue(argv, "--to")) |s| try std.fmt.parseInt(i64, s, 10) else null;
+            const format = flagValue(argv, "--format") orelse "text";
+
+            var report = try report_mod.buildReport(
+                a,
+                io,
+                validated.raw.logging.dir,
+                validated.raw.logging.file,
+                validated.raw.security.workspace_root,
+                rid,
+                from_ts,
+                to_ts,
+            );
+            defer report.deinit(a);
+
+            const out = if (std.mem.eql(u8, format, "json"))
+                try report_mod.formatJson(a, report)
+            else
+                try report_mod.formatText(a, report);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "verify")) {
+            const rid = flagValue(argv, "--request-id") orelse return error.InvalidArgs;
+            const format = flagValue(argv, "--format") orelse "json";
+
+            const receipt_json = try @import("attestation/receipt.zig").readReceiptJsonAlloc(
+                a,
+                io,
+                validated.raw.security.workspace_root,
+                rid,
+            );
+            defer a.free(receipt_json);
+
+            const verify_mod = @import("audit/verify.zig");
+            var result = try verify_mod.verifyAllEvents(a, receipt_json);
+            defer result.deinit(a);
+
+            const out = if (std.mem.eql(u8, format, "text")) blk: {
+                // Wrap in a minimal report for text formatting
+                var report = report_mod.AuditReport{
+                    .request_id = rid,
+                    .events = &.{},
+                    .verify_result = result,
+                    .from_ts = null,
+                    .to_ts = null,
+                };
+                // Don't deinit: result and events are borrowed
+                _ = &report;
+                break :blk try report_mod.formatText(a, report);
+            } else try verify_mod.verifyResultJsonAlloc(a, result);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "summary")) {
+            const from_ts = if (flagValue(argv, "--from")) |s| try std.fmt.parseInt(i64, s, 10) else null;
+            const to_ts = if (flagValue(argv, "--to")) |s| try std.fmt.parseInt(i64, s, 10) else null;
+            const format = flagValue(argv, "--format") orelse "text";
+
+            const log_reader = @import("audit/log_reader.zig");
+            const events = try log_reader.readEvents(a, io, validated.raw.logging.dir, validated.raw.logging.file, .{
+                .from_ts = from_ts,
+                .to_ts = to_ts,
+            });
+            defer log_reader.freeEvents(a, events);
+
+            var stats = try report_mod.buildSummary(a, events);
+            defer stats.deinit(a);
+
+            const out = if (std.mem.eql(u8, format, "json"))
+                try report_mod.formatSummaryJson(a, stats)
+            else
+                try report_mod.formatSummaryText(a, stats);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
+        try usage(io);
+        return;
+    }
 
     if (std.mem.eql(u8, cmd, "config")) {
         const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
@@ -899,6 +1174,13 @@ fn usage(io: std.Io) !void {
         \\zigclaw
         \\
         \\Usage:
+        \\  zigclaw version
+        \\  zigclaw setup
+        \\  zigclaw update [--check] [--url <manifest-url>]
+        \\  zigclaw vault set <name> [--vault <path>]
+        \\  zigclaw vault get <name> [--vault <path>]
+        \\  zigclaw vault list [--vault <path>]
+        \\  zigclaw vault delete <name> [--vault <path>]
         \\  zigclaw init
         \\  zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml]
         \\  zigclaw prompt dump --message "..." [--format json|text] [--out path] [--config zigclaw.toml]
@@ -924,6 +1206,9 @@ fn usage(io: std.Io) !void {
         \\  zigclaw config validate [--config zigclaw.toml] [--format toml|text]
         \\  zigclaw policy hash [--config zigclaw.toml]
         \\  zigclaw policy explain (--tool <name> | --mount <path> | --command "cmd") [--config zigclaw.toml]
+        \\  zigclaw audit report [--request-id <id>] [--from <ts>] [--to <ts>] [--format text|json] [--config zigclaw.toml]
+        \\  zigclaw audit verify --request-id <id> [--format text|json] [--config zigclaw.toml]
+        \\  zigclaw audit summary [--from <ts>] [--to <ts>] [--format text|json] [--config zigclaw.toml]
         \\  zigclaw attest <request_id> [--config zigclaw.toml]
         \\  zigclaw attest verify --request-id <id> --event-index <n> [--config zigclaw.toml]
         \\  zigclaw replay capture --request-id <id> [--config zigclaw.toml]

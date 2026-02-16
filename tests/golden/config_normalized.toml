@@ -26,6 +26,12 @@ file = "decisions.jsonl"
 max_file_bytes = 1048576
 max_files = 5
 
+[attestation]
+enabled = false
+
+[replay]
+enabled = false
+
 [gateway]
 rate_limit_enabled = false
 rate_limit_store = "memory"

@@ -72,6 +72,14 @@ pub const LoggingConfig = struct {
     max_files: u32 = 5,
 };
 
+pub const AttestationConfig = struct {
+    enabled: bool = false,
+};
+
+pub const ReplayConfig = struct {
+    enabled: bool = false,
+};
+
 pub const ToolsConfig = struct {
     wasmtime_path: []const u8 = "wasmtime",
     plugin_dir: []const u8 = "./zig-out/bin",
@@ -154,6 +162,8 @@ pub const Config = struct {
 
     observability: ObservabilityConfig = .{},
     logging: LoggingConfig = .{},
+    attestation: AttestationConfig = .{},
+    replay: ReplayConfig = .{},
 
     provider_primary: ProviderConfig = .{},
     provider_fixtures: ProviderFixturesConfig = .{},
@@ -259,6 +269,10 @@ pub const ValidatedConfig = struct {
             sys.logging.max_file_bytes,
             sys.logging.max_files,
         });
+        try w.print("  attestation.enabled={s} replay.enabled={s}\n", .{
+            if (sys.attestation.enabled) "true" else "false",
+            if (sys.replay.enabled) "true" else "false",
+        });
         try w.print("  capabilities.active_preset={s}\n", .{sys.capabilities.active_preset});
         try w.print("  orchestration.leader_agent={s} agents={d}\n", .{
             sys.orchestration.leader_agent,
@@ -358,6 +372,14 @@ pub const ValidatedConfig = struct {
         try w.writeAll("\n");
         try w.print("max_file_bytes = {d}\n", .{self.raw.logging.max_file_bytes});
         try w.print("max_files = {d}\n\n", .{self.raw.logging.max_files});
+
+        // [attestation]
+        try w.writeAll("[attestation]\n");
+        try w.print("enabled = {s}\n\n", .{if (self.raw.attestation.enabled) "true" else "false"});
+
+        // [replay]
+        try w.writeAll("[replay]\n");
+        try w.print("enabled = {s}\n\n", .{if (self.raw.replay.enabled) "true" else "false"});
 
         // [gateway]
         try w.writeAll("[gateway]\n");
@@ -790,6 +812,14 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
         }
         if (std.mem.eql(u8, k, "logging.max_files")) {
             cfg.logging.max_files = try coerceU32(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "attestation.enabled")) {
+            cfg.attestation.enabled = try coerceBool(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "replay.enabled")) {
+            cfg.replay.enabled = try coerceBool(v);
             continue;
         }
         if (std.mem.eql(u8, k, "gateway.rate_limit_enabled")) {

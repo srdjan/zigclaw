@@ -1631,6 +1631,8 @@ test "gateway agent response includes attestation and receipts endpoint returns 
     vcq.raw.provider_fixtures.mode = .off;
     vcq.raw.observability.enabled = false;
     vcq.raw.security.workspace_root = ws_dir;
+    vcq.raw.attestation.enabled = true;
+    vcq.raw.replay.enabled = true;
 
     var app = try app_mod.App.init(a, io);
     defer app.deinit();
@@ -2305,6 +2307,7 @@ test "runLoop writes execution receipt and verify succeeds for event index" {
     vcq.raw.observability.enabled = false;
     vcq.raw.logging.enabled = false;
     vcq.raw.security.workspace_root = ws_dir;
+    vcq.raw.attestation.enabled = true;
 
     var res = try agent_loop.runLoop(a, io, vcq, "hello receipt", "req_receipt_1", .{});
     defer res.deinit(a);
@@ -2359,6 +2362,7 @@ test "runLoop writes replay capsule and capsule replay returns run_end content" 
     vcq.raw.observability.enabled = false;
     vcq.raw.logging.enabled = false;
     vcq.raw.security.workspace_root = ws_dir;
+    vcq.raw.replay.enabled = true;
 
     var res = try agent_loop.runLoop(a, io, vcq, "hello capsule", "req_capsule_1", .{});
     defer res.deinit(a);
@@ -2587,6 +2591,7 @@ test "capsule diff reports first divergence between two runs" {
     vcq.raw.observability.enabled = false;
     vcq.raw.logging.enabled = false;
     vcq.raw.security.workspace_root = ws_dir;
+    vcq.raw.replay.enabled = true;
 
     var r1 = try agent_loop.runLoop(a, io, vcq, "hello one", "req_capsule_a", .{});
     defer r1.deinit(a);

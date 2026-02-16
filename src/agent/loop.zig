@@ -139,13 +139,14 @@ pub fn runLoop(
 
     var logger = obs.Logger.fromConfig(run_cfg, io);
     const decisions = decision_log.Logger.fromConfig(run_cfg, io);
-    const ledger_enabled = opts.delegate_depth == 0;
+    const ledger_enabled = opts.delegate_depth == 0 and run_cfg.raw.attestation.enabled;
+    const replay_capture_enabled = opts.delegate_depth == 0 and run_cfg.raw.replay.enabled;
     var recorder = replay_recorder.TraceRecorder.init(
         a,
         io,
         run_cfg.raw.security.workspace_root,
         request_id,
-        opts.delegate_depth == 0,
+        replay_capture_enabled,
     );
     defer recorder.deinit();
 

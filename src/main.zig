@@ -752,6 +752,12 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\allow_network = true
         \\allow_write_paths = ["./.zigclaw", "./tmp"]
         \\
+        \\[attestation]
+        \\enabled = false
+        \\
+        \\[replay]
+        \\enabled = false
+        \\
         \\# Optional static multi-agent orchestration
         \\# [orchestration]
         \\# leader_agent = "planner"

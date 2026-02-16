@@ -613,10 +613,38 @@ pub fn main(init: std.process.Init) !void {
 
         if (std.mem.eql(u8, sub, "run")) {
             const capsule_path = flagValue(argv, "--capsule") orelse return error.InvalidArgs;
+            const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+
+            var validated = try app.loadConfig(cfg_path);
+            defer validated.deinit(a);
+
             const capsule_json = try std.Io.Dir.cwd().readFileAlloc(io, capsule_path, a, std.Io.Limit.limited(8 * 1024 * 1024));
             defer a.free(capsule_json);
 
-            const out = try @import("replay/replayer.zig").replayFromCapsuleJsonAlloc(a, capsule_json);
+            var seed = try @import("replay/replayer.zig").extractRunSeedAlloc(a, capsule_json);
+            defer seed.deinit(a);
+
+            var vcq = validated;
+            vcq.raw.provider_fixtures.mode = .capsule_replay;
+            vcq.raw.provider_fixtures.capsule_path = capsule_path;
+            vcq.raw.provider_reliable.retries = 0;
+
+            var result = try @import("agent/loop.zig").runLoop(
+                a,
+                io,
+                vcq,
+                seed.message,
+                seed.request_id,
+                .{ .delegate_depth = 1 },
+            );
+            defer result.deinit(a);
+
+            const out = try jsonObj(a, .{
+                .request_id = seed.request_id,
+                .content = result.content,
+                .turns = result.turns,
+                .replayed = true,
+            });
             defer a.free(out);
 
             var obuf: [4096]u8 = undefined;
@@ -684,6 +712,14 @@ fn hasFlag(argv: []const [:0]const u8, name: []const u8) bool {
         if (std.mem.eql(u8, arg, name)) return true;
     }
     return false;
+}
+
+fn jsonObj(a: std.mem.Allocator, value: anytype) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+    try stream.write(value);
+    return try aw.toOwnedSlice();
 }
 
 fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
@@ -885,7 +921,7 @@ fn usage(io: std.Io) !void {
         \\  zigclaw attest <request_id> [--config zigclaw.toml]
         \\  zigclaw attest verify --request-id <id> --event-index <n> [--config zigclaw.toml]
         \\  zigclaw replay capture --request-id <id> [--config zigclaw.toml]
-        \\  zigclaw replay run --capsule <path>
+        \\  zigclaw replay run --capsule <path> [--config zigclaw.toml]
         \\  zigclaw replay diff --a <path1> --b <path2>
         \\  zigclaw gateway start [--bind 127.0.0.1] [--port 8787] [--config zigclaw.toml]
         \\

@@ -2375,6 +2375,13 @@ test "runLoop writes replay capsule and capsule replay returns run_end content" 
         try std.testing.expect(events.array.items.len > 0);
     }
 
+    {
+        var seed = try replay_replayer.extractRunSeedAlloc(a, capsule_json);
+        defer seed.deinit(a);
+        try std.testing.expectEqualStrings("req_capsule_1", seed.request_id);
+        try std.testing.expectEqualStrings("hello capsule", seed.message);
+    }
+
     const replay_json = try replay_replayer.replayFromCapsuleJsonAlloc(a, capsule_json);
     defer a.free(replay_json);
     {

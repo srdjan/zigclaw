@@ -3,6 +3,7 @@ const config = @import("../config.zig");
 const loop = @import("../agent/loop.zig");
 const obs = @import("../obs/logger.zig");
 const trace = @import("../obs/trace.zig");
+const tasks = @import("../primitives/tasks.zig");
 
 pub const WorkerOptions = struct {
     once: bool = false,
@@ -247,6 +248,9 @@ pub fn runWorker(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, 
             continue;
         }
 
+        const picked = try maybePickupPrimitiveTask(a, io, cfg, logger);
+        if (picked) continue;
+
         if (opts.once) return;
         io.sleep(std.Io.Duration.fromMilliseconds(@intCast(poll_ms)), .awake) catch {};
     }
@@ -481,6 +485,37 @@ fn processOne(
         .status = "ok",
         .attempt = job.attempt,
         .turns = res.turns,
+    });
+    return true;
+}
+
+fn maybePickupPrimitiveTask(
+    a: std.mem.Allocator,
+    io: std.Io,
+    cfg: config.ValidatedConfig,
+    logger: obs.Logger,
+) !bool {
+    if (!cfg.raw.automation.task_pickup_enabled) return false;
+
+    const owner = cfg.raw.automation.default_owner;
+    var picked = try tasks.pickupNextTask(a, io, cfg, owner, cfg.raw.automation.pickup_statuses);
+    if (picked == null) return false;
+    defer picked.?.deinit(a);
+
+    const rid = enqueueAgent(a, io, cfg, picked.?.message, null, null) catch |e| {
+        logger.logJson(a, .queue_job, "task_pickup", .{
+            .status = "enqueue_error",
+            .task_slug = picked.?.slug,
+            .error_name = @errorName(e),
+        });
+        return false;
+    };
+    defer a.free(rid);
+
+    logger.logJson(a, .queue_job, rid, .{
+        .status = "picked_from_primitive",
+        .task_slug = picked.?.slug,
+        .task_title = picked.?.title,
     });
     return true;
 }

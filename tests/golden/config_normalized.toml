@@ -56,6 +56,11 @@ backoff_ms = 250
 backend = "markdown"
 root = "./.zigclaw/memory"
 
+[memory.primitives]
+enabled = true
+templates_dir = "./.zigclaw/memory/templates"
+strict_schema = true
+
 [tools]
 wasmtime_path = "wasmtime"
 plugin_dir = "./zig-out/bin"
@@ -66,3 +71,19 @@ poll_ms = 1000
 max_retries = 2
 retry_backoff_ms = 500
 retry_jitter_pct = 20
+
+[automation]
+task_pickup_enabled = false
+default_owner = "zigclaw"
+pickup_statuses = ["open"]
+
+[persistence.git]
+enabled = false
+repo_dir = "."
+author_name = "zigclaw"
+author_email = "zigclaw@local"
+default_branch = "main"
+allow_paths = ["./.zigclaw/memory/tasks", "./.zigclaw/memory/projects", "./.zigclaw/memory/decisions", "./.zigclaw/memory/lessons", "./.zigclaw/memory/people", "./.zigclaw/memory/templates"]
+deny_paths = ["./.zigclaw/queue", "./.zigclaw/logs", "./.zigclaw/gateway.token", "./.zig-cache", "./zig-out"]
+push_default = false
+remote_name = "origin"

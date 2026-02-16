@@ -58,6 +58,16 @@ zigclaw prompt diff --a file --b file
 zigclaw tools list [--config zigclaw.toml]
 zigclaw tools describe <tool> [--config zigclaw.toml]
 zigclaw tools run <tool> --args '{}' [--config zigclaw.toml]
+zigclaw task add "..." [--priority p] [--owner o] [--project p] [--tags "a,b"] [--status s] [--config zigclaw.toml]
+zigclaw task list [--status s] [--owner o] [--project p] [--format text|json] [--config zigclaw.toml]
+zigclaw task done <slug> [--reason "..."] [--config zigclaw.toml]
+zigclaw primitive validate <slug|path> [--config zigclaw.toml]
+zigclaw templates list [--config zigclaw.toml]
+zigclaw templates show [task] [--config zigclaw.toml]
+zigclaw templates validate [task] [--config zigclaw.toml]
+zigclaw git init [--remote <url>] [--branch <name>] [--json] [--config zigclaw.toml]
+zigclaw git status [--json] [--config zigclaw.toml]
+zigclaw git sync [--message "..."] [--push] [--json] [--config zigclaw.toml]
 zigclaw queue enqueue-agent --message "..." [--agent id] [--request-id id] [--config zigclaw.toml]
 zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.toml]
 zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]
@@ -138,6 +148,11 @@ backoff_ms = 250
 backend = "markdown"
 root = "./.zigclaw/memory"
 
+[memory.primitives]
+enabled = true
+templates_dir = "./.zigclaw/memory/templates"
+strict_schema = true
+
 [tools]
 wasmtime_path = "wasmtime"
 plugin_dir = "./zig-out/bin"
@@ -148,6 +163,22 @@ poll_ms = 1000
 max_retries = 2
 retry_backoff_ms = 500
 retry_jitter_pct = 20
+
+[automation]
+task_pickup_enabled = false
+default_owner = "zigclaw"
+pickup_statuses = ["open"]
+
+[persistence.git]
+enabled = false
+repo_dir = "."
+author_name = "zigclaw"
+author_email = "zigclaw@local"
+default_branch = "main"
+allow_paths = ["./.zigclaw/memory/tasks", "./.zigclaw/memory/projects", "./.zigclaw/memory/decisions", "./.zigclaw/memory/lessons", "./.zigclaw/memory/people", "./.zigclaw/memory/templates"]
+deny_paths = ["./.zigclaw/queue", "./.zigclaw/logs", "./.zigclaw/gateway.token", "./.zig-cache", "./zig-out"]
+push_default = false
+remote_name = "origin"
 ```
 
 ## Capability Presets and Policy
@@ -238,6 +269,9 @@ zig-out/bin/zigclaw gateway start --bind 127.0.0.1 --port 8787 --config zigclaw.
 ```
 
 On startup, gateway prints bearer token and token file path (`<workspace_root>/.zigclaw/gateway.token`).
+
+Additional trigger-style endpoint:
+- `POST /v1/events` creates/updates primitive tasks from event payloads (`title`/`message`, `priority`, `owner`, `project`, `tags`, optional `idempotency_key`).
 
 Health endpoint (no auth):
 ```sh

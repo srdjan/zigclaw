@@ -27,9 +27,16 @@ pub const ProviderReliableConfig = struct {
 
 pub const MemoryBackend = enum { markdown, sqlite };
 
+pub const MemoryPrimitivesConfig = struct {
+    enabled: bool = true,
+    templates_dir: []const u8 = "./.zigclaw/memory/templates",
+    strict_schema: bool = true,
+};
+
 pub const MemoryConfig = struct {
     backend: MemoryBackend = .markdown,
     root: []const u8 = "./.zigclaw/memory",
+    primitives: MemoryPrimitivesConfig = .{},
 };
 
 pub const SecurityConfig = struct {
@@ -75,6 +82,41 @@ pub const QueueConfig = struct {
     retry_jitter_pct: u32 = 20,
 };
 
+pub const AutomationConfig = struct {
+    task_pickup_enabled: bool = false,
+    default_owner: []const u8 = "zigclaw",
+    pickup_statuses: []const []const u8 = &.{"open"},
+};
+
+pub const PersistenceGitConfig = struct {
+    enabled: bool = false,
+    repo_dir: []const u8 = ".",
+    author_name: []const u8 = "zigclaw",
+    author_email: []const u8 = "zigclaw@local",
+    default_branch: []const u8 = "main",
+    allow_paths: []const []const u8 = &.{
+        "./.zigclaw/memory/tasks",
+        "./.zigclaw/memory/projects",
+        "./.zigclaw/memory/decisions",
+        "./.zigclaw/memory/lessons",
+        "./.zigclaw/memory/people",
+        "./.zigclaw/memory/templates",
+    },
+    deny_paths: []const []const u8 = &.{
+        "./.zigclaw/queue",
+        "./.zigclaw/logs",
+        "./.zigclaw/gateway.token",
+        "./.zig-cache",
+        "./zig-out",
+    },
+    push_default: bool = false,
+    remote_name: []const u8 = "origin",
+};
+
+pub const PersistenceConfig = struct {
+    git: PersistenceGitConfig = .{},
+};
+
 pub const CapabilitiesConfig = struct {
     active_preset: []const u8 = "readonly",
     presets: []PresetConfig = &.{},
@@ -114,6 +156,8 @@ pub const Config = struct {
     gateway: GatewayConfig = .{},
     tools: ToolsConfig = .{},
     queue: QueueConfig = .{},
+    automation: AutomationConfig = .{},
+    persistence: PersistenceConfig = .{},
     capabilities: CapabilitiesConfig = .{},
     orchestration: OrchestrationConfig = .{},
 };
@@ -157,6 +201,11 @@ pub const ValidatedConfig = struct {
             @tagName(sys.memory.backend),
             sys.memory.root,
         });
+        try w.print("  memory.primitives.enabled={s} templates_dir={s} strict_schema={s}\n", .{
+            if (sys.memory.primitives.enabled) "true" else "false",
+            sys.memory.primitives.templates_dir,
+            if (sys.memory.primitives.strict_schema) "true" else "false",
+        });
         try w.print("  security.workspace_root={s} max_request_bytes={d}\n", .{
             sys.security.workspace_root,
             sys.security.max_request_bytes,
@@ -180,6 +229,18 @@ pub const ValidatedConfig = struct {
             sys.queue.max_retries,
             sys.queue.retry_backoff_ms,
             sys.queue.retry_jitter_pct,
+        });
+        try w.print("  automation.task_pickup_enabled={s} default_owner={s} pickup_statuses={d}\n", .{
+            if (sys.automation.task_pickup_enabled) "true" else "false",
+            sys.automation.default_owner,
+            sys.automation.pickup_statuses.len,
+        });
+        try w.print("  persistence.git.enabled={s} repo_dir={s} push_default={s} allow_paths={d} deny_paths={d}\n", .{
+            if (sys.persistence.git.enabled) "true" else "false",
+            sys.persistence.git.repo_dir,
+            if (sys.persistence.git.push_default) "true" else "false",
+            sys.persistence.git.allow_paths.len,
+            sys.persistence.git.deny_paths.len,
         });
         try w.print("  logging.enabled={s} dir={s} file={s} max_file_bytes={d} max_files={d}\n", .{
             if (sys.logging.enabled) "true" else "false",
@@ -346,6 +407,14 @@ pub const ValidatedConfig = struct {
         try writeTomlString(w, self.raw.memory.root);
         try w.writeAll("\n\n");
 
+        // [memory.primitives]
+        try w.writeAll("[memory.primitives]\n");
+        try w.print("enabled = {s}\n", .{if (self.raw.memory.primitives.enabled) "true" else "false"});
+        try w.writeAll("templates_dir = ");
+        try writeTomlString(w, self.raw.memory.primitives.templates_dir);
+        try w.writeAll("\n");
+        try w.print("strict_schema = {s}\n\n", .{if (self.raw.memory.primitives.strict_schema) "true" else "false"});
+
         // [tools]
         try w.writeAll("[tools]\n");
         try w.writeAll("wasmtime_path = ");
@@ -363,7 +432,43 @@ pub const ValidatedConfig = struct {
         try w.print("poll_ms = {d}\n", .{self.raw.queue.poll_ms});
         try w.print("max_retries = {d}\n", .{self.raw.queue.max_retries});
         try w.print("retry_backoff_ms = {d}\n", .{self.raw.queue.retry_backoff_ms});
-        try w.print("retry_jitter_pct = {d}\n", .{self.raw.queue.retry_jitter_pct});
+        try w.print("retry_jitter_pct = {d}\n\n", .{self.raw.queue.retry_jitter_pct});
+
+        // [automation]
+        try w.writeAll("[automation]\n");
+        try w.print("task_pickup_enabled = {s}\n", .{if (self.raw.automation.task_pickup_enabled) "true" else "false"});
+        try w.writeAll("default_owner = ");
+        try writeTomlString(w, self.raw.automation.default_owner);
+        try w.writeAll("\n");
+        try w.writeAll("pickup_statuses = ");
+        try writeTomlStringArray(w, self.raw.automation.pickup_statuses);
+        try w.writeAll("\n\n");
+
+        // [persistence.git]
+        try w.writeAll("[persistence.git]\n");
+        try w.print("enabled = {s}\n", .{if (self.raw.persistence.git.enabled) "true" else "false"});
+        try w.writeAll("repo_dir = ");
+        try writeTomlString(w, self.raw.persistence.git.repo_dir);
+        try w.writeAll("\n");
+        try w.writeAll("author_name = ");
+        try writeTomlString(w, self.raw.persistence.git.author_name);
+        try w.writeAll("\n");
+        try w.writeAll("author_email = ");
+        try writeTomlString(w, self.raw.persistence.git.author_email);
+        try w.writeAll("\n");
+        try w.writeAll("default_branch = ");
+        try writeTomlString(w, self.raw.persistence.git.default_branch);
+        try w.writeAll("\n");
+        try w.writeAll("allow_paths = ");
+        try writeTomlStringArray(w, self.raw.persistence.git.allow_paths);
+        try w.writeAll("\n");
+        try w.writeAll("deny_paths = ");
+        try writeTomlStringArray(w, self.raw.persistence.git.deny_paths);
+        try w.writeAll("\n");
+        try w.print("push_default = {s}\n", .{if (self.raw.persistence.git.push_default) "true" else "false"});
+        try w.writeAll("remote_name = ");
+        try writeTomlString(w, self.raw.persistence.git.remote_name);
+        try w.writeAll("\n");
     }
 };
 
@@ -798,6 +903,68 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
             cfg.memory.root = try coerceStringDup(a, v);
             continue;
         }
+        if (std.mem.eql(u8, k, "memory.primitives.enabled")) {
+            cfg.memory.primitives.enabled = try coerceBool(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "memory.primitives.templates_dir")) {
+            cfg.memory.primitives.templates_dir = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "memory.primitives.strict_schema")) {
+            cfg.memory.primitives.strict_schema = try coerceBool(v);
+            continue;
+        }
+
+        if (std.mem.eql(u8, k, "automation.task_pickup_enabled")) {
+            cfg.automation.task_pickup_enabled = try coerceBool(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "automation.default_owner")) {
+            cfg.automation.default_owner = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "automation.pickup_statuses")) {
+            cfg.automation.pickup_statuses = try coerceStringArrayDup(a, v);
+            continue;
+        }
+
+        if (std.mem.eql(u8, k, "persistence.git.enabled")) {
+            cfg.persistence.git.enabled = try coerceBool(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "persistence.git.repo_dir")) {
+            cfg.persistence.git.repo_dir = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "persistence.git.author_name")) {
+            cfg.persistence.git.author_name = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "persistence.git.author_email")) {
+            cfg.persistence.git.author_email = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "persistence.git.default_branch")) {
+            cfg.persistence.git.default_branch = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "persistence.git.allow_paths")) {
+            cfg.persistence.git.allow_paths = try coerceStringArrayDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "persistence.git.deny_paths")) {
+            cfg.persistence.git.deny_paths = try coerceStringArrayDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "persistence.git.push_default")) {
+            cfg.persistence.git.push_default = try coerceBool(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "persistence.git.remote_name")) {
+            cfg.persistence.git.remote_name = try coerceStringDup(a, v);
+            continue;
+        }
 
         if (std.mem.startsWith(u8, k, "capabilities.presets.")) {
             const rest = k["capabilities.presets.".len..];
@@ -858,6 +1025,29 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
             .message = try std.fmt.allocPrint(a, "rate_limit_max_requests={d} invalid; clamping to 1", .{cfg.gateway.rate_limit_max_requests}),
         });
         cfg.gateway.rate_limit_max_requests = 1;
+    }
+
+    if (cfg.automation.pickup_statuses.len == 0) {
+        try warns.append(.{
+            .key_path = try a.dupe(u8, "automation.pickup_statuses"),
+            .message = try a.dupe(u8, "pickup_statuses cannot be empty; using [\"open\"]"),
+        });
+        cfg.automation.pickup_statuses = try dupeStrs(a, &.{"open"});
+    }
+
+    if (cfg.persistence.git.allow_paths.len == 0) {
+        try warns.append(.{
+            .key_path = try a.dupe(u8, "persistence.git.allow_paths"),
+            .message = try a.dupe(u8, "allow_paths cannot be empty; using defaults"),
+        });
+        cfg.persistence.git.allow_paths = try dupeStrs(a, (PersistenceGitConfig{}).allow_paths);
+    }
+    if (cfg.persistence.git.remote_name.len == 0) {
+        try warns.append(.{
+            .key_path = try a.dupe(u8, "persistence.git.remote_name"),
+            .message = try a.dupe(u8, "remote_name cannot be empty; using \"origin\""),
+        });
+        cfg.persistence.git.remote_name = try a.dupe(u8, "origin");
     }
 
     // Build presets
@@ -1101,6 +1291,13 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
         .{ &cfg.provider_primary.api_key_env, &d.provider_primary.api_key_env },
         .{ &cfg.provider_fixtures.dir, &d.provider_fixtures.dir },
         .{ &cfg.memory.root, &d.memory.root },
+        .{ &cfg.memory.primitives.templates_dir, &d.memory.primitives.templates_dir },
+        .{ &cfg.automation.default_owner, &d.automation.default_owner },
+        .{ &cfg.persistence.git.repo_dir, &d.persistence.git.repo_dir },
+        .{ &cfg.persistence.git.author_name, &d.persistence.git.author_name },
+        .{ &cfg.persistence.git.author_email, &d.persistence.git.author_email },
+        .{ &cfg.persistence.git.default_branch, &d.persistence.git.default_branch },
+        .{ &cfg.persistence.git.remote_name, &d.persistence.git.remote_name },
         .{ &cfg.orchestration.leader_agent, &d.orchestration.leader_agent },
     }) |pair| {
         if (pair[0].*.ptr != pair[1].*.ptr) a.free(pair[0].*);
@@ -1115,6 +1312,20 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
     if (cfg.orchestration.agents.ptr != d.orchestration.agents.ptr) {
         for (cfg.orchestration.agents) |ag| freeAgentProfile(a, ag);
         a.free(cfg.orchestration.agents);
+    }
+
+    if (cfg.automation.pickup_statuses.ptr != d.automation.pickup_statuses.ptr) {
+        for (cfg.automation.pickup_statuses) |s| a.free(s);
+        a.free(cfg.automation.pickup_statuses);
+    }
+
+    if (cfg.persistence.git.allow_paths.ptr != d.persistence.git.allow_paths.ptr) {
+        for (cfg.persistence.git.allow_paths) |s| a.free(s);
+        a.free(cfg.persistence.git.allow_paths);
+    }
+    if (cfg.persistence.git.deny_paths.ptr != d.persistence.git.deny_paths.ptr) {
+        for (cfg.persistence.git.deny_paths) |s| a.free(s);
+        a.free(cfg.persistence.git.deny_paths);
     }
 }
 

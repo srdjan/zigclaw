@@ -930,6 +930,8 @@ const agent_loop = @import("agent/loop.zig");
 
 const gw_http = @import("gateway/http.zig");
 const gw_routes = @import("gateway/routes.zig");
+const primitive_tasks = @import("primitives/tasks.zig");
+const git_sync = @import("persistence/git_sync.zig");
 
 fn makeGatewayRequest(
     a: std.mem.Allocator,
@@ -954,6 +956,34 @@ fn makeGatewayRequest(
     const raw = try a.dupe(u8, raw_const);
     errdefer a.free(raw);
     return gw_http.parseFromRaw(a, raw);
+}
+
+fn commandStdoutAlloc(a: std.mem.Allocator, io: std.Io, argv: []const []const u8) ![]u8 {
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+
+    var stdout_bytes: []u8 = &.{};
+    errdefer if (stdout_bytes.len > 0) a.free(stdout_bytes);
+
+    if (child.stdout) |*out| {
+        var buf: [4096]u8 = undefined;
+        var r = out.reader(io, &buf);
+        stdout_bytes = try r.interface.allocRemaining(a, std.Io.Limit.limited(1024 * 1024));
+    } else {
+        stdout_bytes = try a.dupe(u8, "");
+    }
+
+    _ = try child.wait(io);
+    return stdout_bytes;
+}
+
+fn gitIsAvailable(a: std.mem.Allocator, io: std.Io) bool {
+    const out = commandStdoutAlloc(a, io, &.{ "git", "--version" }) catch return false;
+    defer a.free(out);
+    return out.len > 0;
 }
 
 test "gateway http parses request line + headers" {
@@ -1266,6 +1296,267 @@ test "gateway queue metrics route returns queue counts" {
     const incoming_total_v = obj.get("incoming_total") orelse return error.BadGolden;
     try std.testing.expect(incoming_total_v == .integer);
     try std.testing.expect(incoming_total_v.integer >= 1);
+}
+
+test "primitive task add/list/done lifecycle works" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const mem_root = "tests/.tmp_primitive_tasks";
+    std.Io.Dir.cwd().deleteTree(io, mem_root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, mem_root) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+    var vcq = vc;
+    vcq.raw.memory.root = mem_root;
+    vcq.raw.memory.primitives.templates_dir = "tests/.tmp_primitive_tasks/templates";
+    vcq.raw.memory.primitives.strict_schema = true;
+
+    var added = try primitive_tasks.addTask(a, io, vcq, .{
+        .title = "Reply to Justin re shipping delays",
+        .priority = "high",
+        .owner = "clawdious",
+        .project = "hale-pet-door",
+        .tags = "client,email,urgent",
+    });
+    defer added.deinit(a);
+    try std.testing.expect(added.created);
+
+    const open = try primitive_tasks.listTasks(a, io, vcq, .{ .status = "open" });
+    defer primitive_tasks.freeTaskSummaries(a, open);
+    try std.testing.expect(open.len >= 1);
+    try std.testing.expectEqualStrings("open", open[0].status);
+
+    var done = try primitive_tasks.markTaskDone(a, io, vcq, added.slug, "sent tracking update");
+    defer done.deinit(a);
+    try std.testing.expectEqualStrings("done", done.status);
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, added.path, a, std.Io.Limit.limited(256 * 1024));
+    defer a.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "## Transition Ledger") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "sent tracking update") != null);
+}
+
+test "gateway events route creates task and honors idempotency_key" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const mem_root = "tests/.tmp_gateway_events_memory";
+    std.Io.Dir.cwd().deleteTree(io, mem_root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, mem_root) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.memory.root = mem_root;
+    vcq.raw.memory.primitives.templates_dir = "tests/.tmp_gateway_events_memory/templates";
+    vcq.raw.memory.primitives.strict_schema = true;
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    const token = "tok_gateway_events";
+    const body = "{\"type\":\"email\",\"title\":\"Reply to Justin re: shipping delays\",\"priority\":\"high\",\"owner\":\"clawdious\",\"project\":\"hale-pet-door\",\"tags\":\"client,email,urgent\",\"idempotency_key\":\"evt_justin_1\"}";
+
+    var req1 = try makeGatewayRequest(a, "POST", "/v1/events", token, body);
+    defer req1.deinit(a);
+    var resp1 = try gw_routes.handle(a, io, &app, vcq, req1, token, "rid_evt_1");
+    defer resp1.deinit(a);
+    try std.testing.expectEqual(@as(u16, 202), resp1.status);
+
+    var slug1 = std.array_list.Managed(u8).init(a);
+    defer slug1.deinit();
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp1.body, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const created = obj.get("created") orelse return error.BadGolden;
+        try std.testing.expect(created == .bool and created.bool);
+        const task_slug = obj.get("task_slug") orelse return error.BadGolden;
+        try std.testing.expect(task_slug == .string);
+        try slug1.appendSlice(task_slug.string);
+    }
+
+    var req2 = try makeGatewayRequest(a, "POST", "/v1/events", token, body);
+    defer req2.deinit(a);
+    var resp2 = try gw_routes.handle(a, io, &app, vcq, req2, token, "rid_evt_2");
+    defer resp2.deinit(a);
+    try std.testing.expectEqual(@as(u16, 202), resp2.status);
+
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp2.body, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const created = obj.get("created") orelse return error.BadGolden;
+        try std.testing.expect(created == .bool and !created.bool);
+        const task_slug = obj.get("task_slug") orelse return error.BadGolden;
+        try std.testing.expect(task_slug == .string);
+        try std.testing.expectEqualStrings(slug1.items, task_slug.string);
+    }
+}
+
+test "queue worker picks open primitive task when automation enabled" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const mem_root = "tests/.tmp_queue_pickup_memory";
+    const queue_dir = "tests/.tmp_queue_pickup_queue";
+    std.Io.Dir.cwd().deleteTree(io, mem_root) catch {};
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, mem_root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.memory.root = mem_root;
+    vcq.raw.memory.primitives.templates_dir = "tests/.tmp_queue_pickup_memory/templates";
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.automation.task_pickup_enabled = true;
+    vcq.raw.automation.default_owner = "zigclaw";
+
+    var added = try primitive_tasks.addTask(a, io, vcq, .{
+        .title = "Investigate deployment failure",
+        .owner = "zigclaw",
+        .priority = "high",
+    });
+    defer added.deinit(a);
+
+    try queue_worker.runWorker(a, io, vcq, .{ .once = true });
+
+    const in_progress = try primitive_tasks.listTasks(a, io, vcq, .{ .status = "in-progress", .owner = "zigclaw" });
+    defer primitive_tasks.freeTaskSummaries(a, in_progress);
+    try std.testing.expect(in_progress.len >= 1);
+}
+
+test "git persistence status classifies syncable and ignored paths" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    if (!gitIsAvailable(a, io)) return;
+
+    const root = "tests/.tmp_git_status";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    try std.Io.Dir.cwd().createDirPath(io, "tests/.tmp_git_status/.zigclaw/memory/tasks");
+    try std.Io.Dir.cwd().createDirPath(io, "tests/.tmp_git_status/.zigclaw/queue/incoming");
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = "tests/.tmp_git_status/.zigclaw/memory/tasks/demo.md",
+        .data = "---\ntitle: \"demo\"\nstatus: \"open\"\n---\n",
+    });
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = "tests/.tmp_git_status/.zigclaw/queue/incoming/job.json",
+        .data = "{\"request_id\":\"x\"}\n",
+    });
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+    var vcq = vc;
+    vcq.raw.security.workspace_root = root;
+    vcq.raw.memory.root = "./.zigclaw/memory";
+    vcq.raw.persistence.git.enabled = true;
+    vcq.raw.persistence.git.repo_dir = ".";
+
+    var init_res = try git_sync.initRepo(a, io, vcq, .{ .branch = "main" });
+    defer init_res.deinit(a);
+
+    var st = try git_sync.status(a, io, vcq);
+    defer st.deinit(a);
+
+    var saw_syncable = false;
+    for (st.syncable_paths) |p| {
+        if (std.mem.eql(u8, p, ".zigclaw/memory/tasks/demo.md")) saw_syncable = true;
+    }
+    try std.testing.expect(saw_syncable);
+
+    var saw_ignored = false;
+    for (st.ignored_paths) |p| {
+        if (std.mem.eql(u8, p, ".zigclaw/queue/incoming/job.json")) saw_ignored = true;
+    }
+    try std.testing.expect(saw_ignored);
+}
+
+test "git persistence sync commits allowed paths only" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    if (!gitIsAvailable(a, io)) return;
+
+    const root = "tests/.tmp_git_sync";
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    try std.Io.Dir.cwd().createDirPath(io, "tests/.tmp_git_sync/.zigclaw/memory/tasks");
+    try std.Io.Dir.cwd().createDirPath(io, "tests/.tmp_git_sync/.zigclaw/queue/incoming");
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = "tests/.tmp_git_sync/.zigclaw/memory/tasks/demo.md",
+        .data = "---\ntitle: \"demo\"\nstatus: \"open\"\n---\n",
+    });
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = "tests/.tmp_git_sync/.zigclaw/queue/incoming/job.json",
+        .data = "{\"request_id\":\"x\"}\n",
+    });
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+    var vcq = vc;
+    vcq.raw.security.workspace_root = root;
+    vcq.raw.memory.root = "./.zigclaw/memory";
+    vcq.raw.persistence.git.enabled = true;
+    vcq.raw.persistence.git.repo_dir = ".";
+
+    var init_res = try git_sync.initRepo(a, io, vcq, .{ .branch = "main" });
+    defer init_res.deinit(a);
+
+    var sync_res = try git_sync.sync(a, io, vcq, .{});
+    defer sync_res.deinit(a);
+    try std.testing.expect(sync_res.committed);
+    try std.testing.expect(!sync_res.noop);
+    try std.testing.expect(sync_res.commit_hash != null);
+
+    const tracked = try commandStdoutAlloc(a, io, &.{ "git", "-C", root, "ls-files" });
+    defer a.free(tracked);
+    try std.testing.expect(std.mem.indexOf(u8, tracked, ".zigclaw/memory/tasks/demo.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tracked, ".zigclaw/queue/incoming/job.json") == null);
 }
 
 test "gateway decision log records auth and request size boundaries" {

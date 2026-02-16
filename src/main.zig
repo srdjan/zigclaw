@@ -185,6 +185,151 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "task")) {
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
+        const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+        var validated = try app.loadConfig(cfg_path);
+        defer validated.deinit(a);
+
+        const tasks = @import("primitives/tasks.zig");
+
+        if (std.mem.eql(u8, sub, "add")) {
+            const title = if (argv.len >= 4) argv[3] else (flagValue(argv, "--title") orelse return error.InvalidArgs);
+            var res = try tasks.addTask(a, io, validated, .{
+                .title = title,
+                .status = flagValue(argv, "--status"),
+                .priority = flagValue(argv, "--priority"),
+                .owner = flagValue(argv, "--owner"),
+                .project = flagValue(argv, "--project"),
+                .tags = flagValue(argv, "--tags"),
+                .due = flagValue(argv, "--due"),
+                .estimate = flagValue(argv, "--estimate"),
+                .parent = flagValue(argv, "--parent"),
+                .depends_on = flagValue(argv, "--depends-on"),
+                .body = flagValue(argv, "--body"),
+                .event_id = flagValue(argv, "--event-id"),
+            });
+            defer res.deinit(a);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{{\"slug\":\"{s}\",\"path\":\"{s}\",\"created\":{s}}}\n", .{
+                res.slug,
+                res.path,
+                if (res.created) "true" else "false",
+            });
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "list")) {
+            const format = flagValue(argv, "--format") orelse "text";
+            const items = try tasks.listTasks(a, io, validated, .{
+                .status = flagValue(argv, "--status"),
+                .owner = flagValue(argv, "--owner"),
+                .project = flagValue(argv, "--project"),
+            });
+            defer tasks.freeTaskSummaries(a, items);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            if (std.mem.eql(u8, format, "json")) {
+                const json = try tasks.listJsonAlloc(a, items);
+                defer a.free(json);
+                try ow.interface.print("{s}\n", .{json});
+            } else {
+                for (items) |item| {
+                    try ow.interface.print("{s}\t{s}\t{s}\n", .{ item.slug, item.status, item.title });
+                }
+            }
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "done")) {
+            if (argv.len < 4) return error.InvalidArgs;
+            const slug = argv[3];
+            var item = try tasks.markTaskDone(a, io, validated, slug, flagValue(argv, "--reason"));
+            defer item.deinit(a);
+            const out = try tasks.summaryJsonAlloc(a, item);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
+        try usage(io);
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "primitive")) {
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
+        if (!std.mem.eql(u8, sub, "validate")) {
+            try usage(io);
+            return;
+        }
+        if (argv.len < 4) return error.InvalidArgs;
+        const target = argv[3];
+        const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+
+        var validated = try app.loadConfig(cfg_path);
+        defer validated.deinit(a);
+
+        try @import("primitives/tasks.zig").validateTaskPrimitive(a, io, validated, target);
+
+        var obuf: [4096]u8 = undefined;
+        var ow = std.Io.File.stdout().writer(io, &obuf);
+        try ow.interface.print("{{\"ok\":true,\"target\":\"{s}\"}}\n", .{target});
+        try ow.flush();
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "templates")) {
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
+        const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+        var validated = try app.loadConfig(cfg_path);
+        defer validated.deinit(a);
+        const tasks = @import("primitives/tasks.zig");
+
+        if (std.mem.eql(u8, sub, "list")) {
+            const out = try tasks.listTemplatesJsonAlloc(a, io, validated);
+            defer a.free(out);
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "show")) {
+            const name = if (argv.len >= 4) argv[3] else "task";
+            const out = try tasks.showTemplateAlloc(a, io, validated, name);
+            defer a.free(out);
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}", .{out});
+            if (out.len == 0 or out[out.len - 1] != '\n') try ow.interface.writeAll("\n");
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "validate")) {
+            const name = if (argv.len >= 4) argv[3] else "task";
+            try tasks.validateTemplate(a, io, validated, name);
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{{\"ok\":true,\"template\":\"{s}\"}}\n", .{name});
+            try ow.flush();
+            return;
+        }
+
+        try usage(io);
+        return;
+    }
+
     if (std.mem.eql(u8, cmd, "queue")) {
         const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
         const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
@@ -251,6 +396,101 @@ pub fn main(init: std.process.Init) !void {
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
             try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
+        try usage(io);
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "git")) {
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
+        const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+        var validated = try app.loadConfig(cfg_path);
+        defer validated.deinit(a);
+
+        const git_sync = @import("persistence/git_sync.zig");
+        const as_json = hasFlag(argv, "--json");
+
+        if (std.mem.eql(u8, sub, "status")) {
+            var st = try git_sync.status(a, io, validated);
+            defer st.deinit(a);
+
+            const out = try git_sync.statusJsonAlloc(a, st);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            if (as_json) {
+                try ow.interface.print("{s}\n", .{out});
+            } else {
+                try ow.interface.print("repo_ok={s} remote_configured={s} syncable={d} ignored={d}\n", .{
+                    if (st.repo_ok) "true" else "false",
+                    if (st.remote_configured) "true" else "false",
+                    st.syncable_paths.len,
+                    st.ignored_paths.len,
+                });
+                for (st.syncable_paths) |p| try ow.interface.print("syncable: {s}\n", .{p});
+                for (st.ignored_paths) |p| try ow.interface.print("ignored: {s}\n", .{p});
+            }
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "sync")) {
+            var res = try git_sync.sync(a, io, validated, .{
+                .message = flagValue(argv, "--message"),
+                .push = hasFlag(argv, "--push"),
+            });
+            defer res.deinit(a);
+
+            const out = try git_sync.syncJsonAlloc(a, res);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            if (as_json) {
+                try ow.interface.print("{s}\n", .{out});
+            } else {
+                try ow.interface.print(
+                    "noop={s} committed={s} pushed={s} syncable={d} ignored={d}",
+                    .{
+                        if (res.noop) "true" else "false",
+                        if (res.committed) "true" else "false",
+                        if (res.pushed) "true" else "false",
+                        res.syncable_count,
+                        res.ignored_count,
+                    },
+                );
+                if (res.commit_hash) |h| try ow.interface.print(" commit={s}", .{h});
+                try ow.interface.writeAll("\n");
+            }
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "init")) {
+            var init_res = try git_sync.initRepo(a, io, validated, .{
+                .remote = flagValue(argv, "--remote"),
+                .branch = flagValue(argv, "--branch"),
+            });
+            defer init_res.deinit(a);
+
+            const out = try git_sync.initJsonAlloc(a, init_res);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            if (as_json) {
+                try ow.interface.print("{s}\n", .{out});
+            } else {
+                try ow.interface.print("repo_ready={s} remote_configured={s} branch={s}\n", .{
+                    if (init_res.repo_ready) "true" else "false",
+                    if (init_res.remote_configured) "true" else "false",
+                    init_res.branch,
+                });
+            }
             try ow.flush();
             return;
         }
@@ -413,6 +653,11 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\backend = "markdown"
         \\root = "./.zigclaw/memory"
         \\
+        \\[memory.primitives]
+        \\enabled = true
+        \\templates_dir = "./.zigclaw/memory/templates"
+        \\strict_schema = true
+        \\
         \\[tools]
         \\wasmtime_path = "wasmtime"
         \\plugin_dir = "./zig-out/bin"
@@ -423,6 +668,22 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\max_retries = 2
         \\retry_backoff_ms = 500
         \\retry_jitter_pct = 20
+        \\
+        \\[automation]
+        \\task_pickup_enabled = false
+        \\default_owner = "zigclaw"
+        \\pickup_statuses = ["open"]
+        \\
+        \\[persistence.git]
+        \\enabled = false
+        \\repo_dir = "."
+        \\author_name = "zigclaw"
+        \\author_email = "zigclaw@local"
+        \\default_branch = "main"
+        \\allow_paths = ["./.zigclaw/memory/tasks", "./.zigclaw/memory/projects", "./.zigclaw/memory/decisions", "./.zigclaw/memory/lessons", "./.zigclaw/memory/people", "./.zigclaw/memory/templates"]
+        \\deny_paths = ["./.zigclaw/queue", "./.zigclaw/logs", "./.zigclaw/gateway.token", "./.zig-cache", "./zig-out"]
+        \\push_default = false
+        \\remote_name = "origin"
         \\
         \\[observability]
         \\enabled = true
@@ -449,12 +710,24 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
 
     // Create directories
     dir.createDirPath(io, ".zigclaw/memory") catch {};
+    dir.createDirPath(io, ".zigclaw/memory/tasks") catch {};
+    dir.createDirPath(io, ".zigclaw/memory/projects") catch {};
+    dir.createDirPath(io, ".zigclaw/memory/decisions") catch {};
+    dir.createDirPath(io, ".zigclaw/memory/lessons") catch {};
+    dir.createDirPath(io, ".zigclaw/memory/people") catch {};
+    dir.createDirPath(io, ".zigclaw/memory/templates") catch {};
     dir.createDirPath(io, ".zigclaw/logs") catch {};
     dir.createDirPath(io, ".zigclaw/queue/incoming") catch {};
     dir.createDirPath(io, ".zigclaw/queue/processing") catch {};
     dir.createDirPath(io, ".zigclaw/queue/outgoing") catch {};
     dir.createDirPath(io, ".zigclaw/queue/canceled") catch {};
     dir.createDirPath(io, ".zigclaw/queue/cancel_requests") catch {};
+
+    const default_tpl = @import("primitives/tasks.zig").default_task_template_md;
+    const tpl_exists = if (dir.statFile(io, ".zigclaw/memory/templates/task.md", .{})) |_| true else |_| false;
+    if (!tpl_exists) {
+        dir.writeFile(io, .{ .sub_path = ".zigclaw/memory/templates/task.md", .data = default_tpl }) catch {};
+    }
 
     try ow.interface.writeAll("Created zigclaw.toml and .zigclaw/ directories.\n");
     try ow.interface.writeAll("Next steps:\n");
@@ -478,6 +751,16 @@ fn usage(io: std.Io) !void {
         \\  zigclaw tools list [--config zigclaw.toml]
         \\  zigclaw tools describe <tool> [--config zigclaw.toml]
         \\  zigclaw tools run <tool> --args '{}' [--config zigclaw.toml]
+        \\  zigclaw task add "..." [--priority p] [--owner o] [--project p] [--tags "a,b"] [--status s] [--config zigclaw.toml]
+        \\  zigclaw task list [--status s] [--owner o] [--project p] [--format text|json] [--config zigclaw.toml]
+        \\  zigclaw task done <slug> [--reason "..."] [--config zigclaw.toml]
+        \\  zigclaw primitive validate <slug|path> [--config zigclaw.toml]
+        \\  zigclaw templates list [--config zigclaw.toml]
+        \\  zigclaw templates show [task] [--config zigclaw.toml]
+        \\  zigclaw templates validate [task] [--config zigclaw.toml]
+        \\  zigclaw git init [--remote <url>] [--branch <name>] [--json] [--config zigclaw.toml]
+        \\  zigclaw git status [--json] [--config zigclaw.toml]
+        \\  zigclaw git sync [--message \"...\"] [--push] [--json] [--config zigclaw.toml]
         \\  zigclaw queue enqueue-agent --message "..." [--agent id] [--request-id id] [--config zigclaw.toml]
         \\  zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.toml]
         \\  zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]

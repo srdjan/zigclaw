@@ -7,6 +7,7 @@ const tools_rt = @import("../tools/manifest_runtime.zig");
 const agent_loop = @import("../agent/loop.zig");
 const queue_worker = @import("../queue/worker.zig");
 const decision_log = @import("../decision_log.zig");
+const tasks = @import("../primitives/tasks.zig");
 
 const rate_bucket_count: usize = 128;
 const max_client_key_len: usize = 96;
@@ -188,6 +189,84 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         defer a.free(queued_id);
 
         const body = try jsonObj(a, .{ .request_id = queued_id, .queued = true });
+        return .{ .status = 202, .body = body };
+    }
+
+    if (std.mem.eql(u8, req.method, "POST") and std.mem.eql(u8, path, "/v1/events")) {
+        const parsed = std.json.parseFromSlice(std.json.Value, a, req.body, .{}) catch return jsonError(a, 400, request_id, "invalid JSON");
+        defer parsed.deinit();
+        if (parsed.value != .object) return jsonError(a, 400, request_id, "payload must be object");
+        const obj = parsed.value.object;
+
+        const title = blk: {
+            if (obj.get("title")) |t| {
+                if (t != .string) return jsonError(a, 400, request_id, "'title' must be string");
+                break :blk t.string;
+            }
+            if (obj.get("message")) |m| {
+                if (m != .string) return jsonError(a, 400, request_id, "'message' must be string");
+                break :blk m.string;
+            }
+            return jsonError(a, 400, request_id, "missing 'title' or 'message'");
+        };
+
+        const priority = if (obj.get("priority")) |v| switch (v) {
+            .string => |s| s,
+            else => return jsonError(a, 400, request_id, "'priority' must be string"),
+        } else null;
+        const owner = if (obj.get("owner")) |v| switch (v) {
+            .string => |s| s,
+            else => return jsonError(a, 400, request_id, "'owner' must be string"),
+        } else null;
+        const project = if (obj.get("project")) |v| switch (v) {
+            .string => |s| s,
+            else => return jsonError(a, 400, request_id, "'project' must be string"),
+        } else null;
+        const tags = if (obj.get("tags")) |v| switch (v) {
+            .string => |s| s,
+            else => null,
+        } else null;
+        const context = if (obj.get("context")) |v| switch (v) {
+            .string => |s| s,
+            else => null,
+        } else null;
+
+        const event_id = blk: {
+            if (obj.get("idempotency_key")) |v| {
+                if (v != .string) return jsonError(a, 400, request_id, "'idempotency_key' must be string");
+                break :blk v.string;
+            }
+            if (obj.get("id")) |v| {
+                if (v != .string) return jsonError(a, 400, request_id, "'id' must be string");
+                break :blk v.string;
+            }
+            break :blk null;
+        };
+
+        var created = tasks.addTask(a, io, cfg, .{
+            .title = title,
+            .priority = priority,
+            .owner = owner,
+            .project = project,
+            .tags = tags,
+            .body = context,
+            .event_id = event_id,
+        }) catch |e| switch (e) {
+            error.InvalidArgs,
+            error.RequiredFieldMissing,
+            error.TemplateTypeMismatch,
+            error.TemplateEnumViolation,
+            => return jsonError(a, 400, request_id, @errorName(e)),
+            else => return jsonError(a, 500, request_id, @errorName(e)),
+        };
+        defer created.deinit(a);
+
+        const body = try jsonObj(a, .{
+            .request_id = request_id,
+            .created = created.created,
+            .task_slug = created.slug,
+            .task_path = created.path,
+        });
         return .{ .status = 202, .body = body };
     }
 

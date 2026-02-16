@@ -2,6 +2,7 @@ const std = @import("std");
 const config = @import("../config.zig");
 const protocol = @import("protocol.zig");
 const manifest_mod = @import("manifest.zig");
+const registry_mod = @import("registry.zig");
 const schema = @import("schema.zig");
 
 const obs = @import("../obs/logger.zig");
@@ -9,6 +10,7 @@ const trace = @import("../obs/trace.zig");
 const hash = @import("../obs/hash.zig");
 const decision_log = @import("../decision_log.zig");
 const ledger_mod = @import("../attestation/ledger.zig");
+const cache_mod = @import("cache.zig");
 
 pub const ToolRunResult = struct {
     request_id: []u8,
@@ -59,6 +61,7 @@ pub const ToolRunResult = struct {
 pub const RunMeta = struct {
     prompt_hash: ?[]const u8 = null,
     ledger: ?*ledger_mod.MerkleTree = null,
+    cache: ?*cache_mod.ToolCache = null,
 };
 
 pub fn run(
@@ -104,6 +107,28 @@ pub fn run(
     var owned = try manifest_mod.loadManifest(a, io, manifest_path);
     defer owned.deinit(a);
     const m = owned.manifest;
+    const strict_registry = cfg.raw.tools.registry.strict;
+
+    const registry_match = try registry_mod.checkManifest(a, m);
+    switch (registry_match) {
+        .ok => {},
+        .unregistered => {
+            if (strict_registry) return error.ToolNotInRegistry;
+            logger.logJson(a, .tool_run, request_id, .{
+                .tool = tool,
+                .status = "registry_unregistered",
+                .policy_hash = cfg.policy.policyHash(),
+            });
+        },
+        .abi_mismatch => {
+            if (strict_registry) return error.ToolAbiMismatch;
+            logger.logJson(a, .tool_run, request_id, .{
+                .tool = tool,
+                .status = "registry_abi_mismatch",
+                .policy_hash = cfg.policy.policyHash(),
+            });
+        },
+    }
 
     // Fail-closed: tool requiring network must be explicitly allowed (capability preset allow_network=true)
     if (m.requires_network) {
@@ -122,10 +147,38 @@ pub fn run(
     }
 
     // Validate args against schema
-    schema.validateArgs(m.args, args_json) catch return error.InvalidToolArgs;
+    schema.validateArgs(m.args, args_json, strict_registry) catch return error.InvalidToolArgs;
 
     const mounts = try cfg.policy.makeMounts(a);
     defer freeMounts(a, mounts);
+    const has_writable_mount = hasWritableMount(mounts);
+
+    var cache_key: ?[]u8 = null;
+    defer if (cache_key) |k| a.free(k);
+    if (meta.cache) |cache| {
+        cache_key = cache.computeKey(a, tool, args_json, mounts) catch null;
+        if (cache_key) |k| {
+            if (cache.lookup(k)) |cached| {
+                logger.logJson(a, .tool_run, request_id, .{
+                    .tool = tool,
+                    .status = "cache_hit",
+                    .policy_hash = cfg.policy.policyHash(),
+                });
+                return .{
+                    .request_id = try a.dupe(u8, request_id),
+                    .ok = cached.ok,
+                    .data_json = try a.dupe(u8, cached.data_json),
+                    .stdout = try a.dupe(u8, cached.stdout),
+                    .stderr = try a.dupe(u8, cached.stderr),
+                };
+            }
+            logger.logJson(a, .tool_run, request_id, .{
+                .tool = tool,
+                .status = "cache_miss",
+                .policy_hash = cfg.policy.policyHash(),
+            });
+        }
+    }
 
     // For native tools, pass the actual host workspace root as cwd
     const cwd = if (m.native) cfg.raw.security.workspace_root else "/workspace";
@@ -206,6 +259,20 @@ pub fn run(
     var decoded = try protocol.decodeResponse(a, stdout_bytes);
     defer decoded.deinit(a);
 
+    if (meta.cache) |cache| {
+        if (cache_key) |k| {
+            _ = cache.store(k, .{
+                .ok = decoded.response.ok,
+                .data_json = decoded.response.data_json,
+                .stdout = decoded.response.stdout,
+                .stderr = decoded.response.stderr,
+            }) catch {};
+        }
+        if (has_writable_mount) {
+            cache.invalidateWorkspaceSnapshot();
+        }
+    }
+
     return .{
         .request_id = try a.dupe(u8, request_id),
         .ok = decoded.response.ok,
@@ -220,6 +287,13 @@ fn freeMounts(a: std.mem.Allocator, mounts: []const @import("../policy.zig").Mou
         if (!m.read_only) a.free(m.guest_path);
     }
     a.free(mounts);
+}
+
+fn hasWritableMount(mounts: []const @import("../policy.zig").Mount) bool {
+    for (mounts) |m| {
+        if (!m.read_only) return true;
+    }
+    return false;
 }
 
 fn readCapped(a: std.mem.Allocator, io: std.Io, file: std.Io.File, cap: usize) ![]u8 {

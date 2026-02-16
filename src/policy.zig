@@ -3,6 +3,7 @@ const cfg = @import("config.zig");
 const hash_mod = @import("obs/hash.zig");
 const commands = @import("security/commands.zig");
 const token_mod = @import("policy/token.zig");
+const algebra = @import("policy/algebra.zig");
 
 pub const Mount = struct {
     host_path: []const u8,
@@ -350,6 +351,38 @@ pub const Policy = struct {
         };
     }
 };
+
+pub fn intersectPresets(a: std.mem.Allocator, parent: Preset, child: Preset) !Preset {
+    var intersection = try algebra.intersectAlloc(a, .{
+        .tools = parent.tools,
+        .allow_network = parent.allow_network,
+        .write_paths = parent.allow_write_paths,
+    }, .{
+        .tools = child.tools,
+        .allow_network = child.allow_network,
+        .write_paths = child.allow_write_paths,
+    });
+    errdefer intersection.deinit(a);
+
+    return .{
+        .name = try a.dupe(u8, child.name),
+        .tools = intersection.tools,
+        .allow_network = intersection.allow_network,
+        .allow_write_paths = intersection.write_paths,
+    };
+}
+
+pub fn isSubsetOf(child: Preset, parent: Preset) bool {
+    return algebra.isSubsetOf(.{
+        .tools = child.tools,
+        .allow_network = child.allow_network,
+        .write_paths = child.allow_write_paths,
+    }, .{
+        .tools = parent.tools,
+        .allow_network = parent.allow_network,
+        .write_paths = parent.allow_write_paths,
+    });
+}
 
 fn dupeStrSlice(a: std.mem.Allocator, items: []const []const u8) ![]const []const u8 {
     var out = std.array_list.Managed([]const u8).init(a);

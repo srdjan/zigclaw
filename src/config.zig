@@ -1,5 +1,7 @@
 const std = @import("std");
 const policy_mod = @import("policy.zig");
+const policy_algebra = @import("policy/algebra.zig");
+const tools_registry = @import("tools/registry.zig");
 
 pub const ProviderKind = enum { stub, openai_compat };
 
@@ -72,6 +74,11 @@ pub const LoggingConfig = struct {
 pub const ToolsConfig = struct {
     wasmtime_path: []const u8 = "wasmtime",
     plugin_dir: []const u8 = "./zig-out/bin",
+    registry: ToolsRegistryConfig = .{},
+};
+
+pub const ToolsRegistryConfig = struct {
+    strict: bool = false,
 };
 
 pub const QueueConfig = struct {
@@ -219,9 +226,10 @@ pub const ValidatedConfig = struct {
             @tagName(sys.gateway.rate_limit_store),
             sys.gateway.rate_limit_dir,
         });
-        try w.print("  tools.wasmtime_path={s} plugin_dir={s}\n", .{
+        try w.print("  tools.wasmtime_path={s} plugin_dir={s} registry.strict={s}\n", .{
             sys.tools.wasmtime_path,
             sys.tools.plugin_dir,
+            if (sys.tools.registry.strict) "true" else "false",
         });
         try w.print("  queue.dir={s} poll_ms={d} max_retries={d} retry_backoff_ms={d} retry_jitter_pct={d}\n", .{
             sys.queue.dir,
@@ -423,6 +431,10 @@ pub const ValidatedConfig = struct {
         try w.writeAll("plugin_dir = ");
         try writeTomlString(w, self.raw.tools.plugin_dir);
         try w.writeAll("\n\n");
+
+        // [tools.registry]
+        try w.writeAll("[tools.registry]\n");
+        try w.print("strict = {s}\n\n", .{if (self.raw.tools.registry.strict) "true" else "false"});
 
         // [queue]
         try w.writeAll("[queue]\n");
@@ -817,6 +829,10 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
             cfg.tools.plugin_dir = try coerceStringDup(a, v);
             continue;
         }
+        if (std.mem.eql(u8, k, "tools.registry.strict")) {
+            cfg.tools.registry.strict = try coerceBool(v);
+            continue;
+        }
 
         if (std.mem.eql(u8, k, "queue.dir")) {
             cfg.queue.dir = try coerceStringDup(a, v);
@@ -1195,7 +1211,115 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
         }
     }
 
+    try validatePresetToolsAgainstRegistry(a, cfg, &warns);
+    try validateDelegationPresetSubsets(a, cfg, &warns);
+
     return .{ .cfg = cfg, .warnings = try warns.toOwnedSlice() };
+}
+
+fn validatePresetToolsAgainstRegistry(a: std.mem.Allocator, cfg: Config, warns: *std.array_list.Managed(Warning)) !void {
+    for (cfg.capabilities.presets) |preset| {
+        for (preset.tools) |tool_name| {
+            const entry = tools_registry.find(tool_name);
+            if (entry == null) {
+                if (cfg.tools.registry.strict) return error.UnregisteredTool;
+                try warns.append(.{
+                    .key_path = try std.fmt.allocPrint(a, "capabilities.presets.{s}.tools", .{preset.name}),
+                    .message = try std.fmt.allocPrint(
+                        a,
+                        "tool '{s}' is not present in compiled ABI registry",
+                        .{tool_name},
+                    ),
+                });
+                continue;
+            }
+
+            if (entry.?.requires_network and !preset.allow_network) {
+                if (cfg.tools.registry.strict) return error.NetworkToolRequiresPresetNetwork;
+                try warns.append(.{
+                    .key_path = try std.fmt.allocPrint(a, "capabilities.presets.{s}.allow_network", .{preset.name}),
+                    .message = try std.fmt.allocPrint(
+                        a,
+                        "preset '{s}' includes network tool '{s}' but allow_network=false",
+                        .{ preset.name, tool_name },
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn validateDelegationPresetSubsets(a: std.mem.Allocator, cfg: Config, warns: *std.array_list.Managed(Warning)) !void {
+    if (cfg.orchestration.agents.len == 0) return;
+
+    for (cfg.orchestration.agents) |agent| {
+        const parent_preset = findPresetByName(cfg.capabilities.presets, agent.capability_preset) orelse {
+            if (cfg.tools.registry.strict) return error.UnknownCapabilityPreset;
+            try warns.append(.{
+                .key_path = try std.fmt.allocPrint(a, "agents.{s}.capability_preset", .{agent.id}),
+                .message = try std.fmt.allocPrint(
+                    a,
+                    "agent '{s}' references unknown preset '{s}'",
+                    .{ agent.id, agent.capability_preset },
+                ),
+            });
+            continue;
+        };
+
+        const parent_caps = policy_algebra.CapabilityView{
+            .tools = parent_preset.tools,
+            .allow_network = parent_preset.allow_network,
+            .write_paths = parent_preset.allow_write_paths,
+        };
+
+        for (agent.delegate_to) |target_id| {
+            const target_agent = findAgentById(cfg.orchestration.agents, target_id) orelse continue;
+            const child_preset = findPresetByName(cfg.capabilities.presets, target_agent.capability_preset) orelse {
+                if (cfg.tools.registry.strict) return error.UnknownCapabilityPreset;
+                try warns.append(.{
+                    .key_path = try std.fmt.allocPrint(a, "agents.{s}.capability_preset", .{target_agent.id}),
+                    .message = try std.fmt.allocPrint(
+                        a,
+                        "agent '{s}' references unknown preset '{s}'",
+                        .{ target_agent.id, target_agent.capability_preset },
+                    ),
+                });
+                continue;
+            };
+
+            const child_caps = policy_algebra.CapabilityView{
+                .tools = child_preset.tools,
+                .allow_network = child_preset.allow_network,
+                .write_paths = child_preset.allow_write_paths,
+            };
+
+            if (!policy_algebra.isSubsetOf(child_caps, parent_caps)) {
+                if (cfg.tools.registry.strict) return error.DelegationPresetEscalation;
+                try warns.append(.{
+                    .key_path = try std.fmt.allocPrint(a, "agents.{s}.delegate_to", .{agent.id}),
+                    .message = try std.fmt.allocPrint(
+                        a,
+                        "delegate target '{s}' preset '{s}' is not a subset of '{s}'",
+                        .{ target_agent.id, child_preset.name, parent_preset.name },
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn findPresetByName(presets: []const PresetConfig, name: []const u8) ?PresetConfig {
+    for (presets) |preset| {
+        if (std.mem.eql(u8, preset.name, name)) return preset;
+    }
+    return null;
+}
+
+fn findAgentById(agents: []const AgentProfileConfig, id: []const u8) ?AgentProfileConfig {
+    for (agents) |agent| {
+        if (std.mem.eql(u8, agent.id, id)) return agent;
+    }
+    return null;
 }
 
 fn unknownKeyWarn(a: std.mem.Allocator, warns: *std.array_list.Managed(Warning), k: []const u8) !void {

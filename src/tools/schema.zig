@@ -5,13 +5,14 @@ pub const ValidationError = error{
     InvalidJson,
     NotObject,
     MissingRequired,
+    UnknownKey,
     TypeMismatch,
     TooLong,
     NotInEnum,
     OutOfRange,
 };
 
-pub fn validateArgs(schema: manifest.ArgSchema, args_json: []const u8) ValidationError!void {
+pub fn validateArgs(schema: manifest.ArgSchema, args_json: []const u8, strict_unknown_keys: bool) ValidationError!void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -67,4 +68,18 @@ pub fn validateArgs(schema: manifest.ArgSchema, args_json: []const u8) Validatio
             },
         }
     }
+
+    if (strict_unknown_keys) {
+        var it = obj.iterator();
+        while (it.next()) |entry| {
+            if (!schemaHasProperty(schema, entry.key_ptr.*)) return ValidationError.UnknownKey;
+        }
+    }
+}
+
+fn schemaHasProperty(schema: manifest.ArgSchema, key: []const u8) bool {
+    for (schema.properties) |property| {
+        if (std.mem.eql(u8, property.name, key)) return true;
+    }
+    return false;
 }

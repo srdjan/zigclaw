@@ -9,10 +9,12 @@ const hash_mod = @import("../obs/hash.zig");
 const trace = @import("../obs/trace.zig");
 const decision_log = @import("../decision_log.zig");
 const tools_runner = @import("../tools/runner.zig");
+const tools_cache = @import("../tools/cache.zig");
 const manifest_mod = @import("../tools/manifest.zig");
 const token_mod = @import("../policy/token.zig");
 const att_ledger = @import("../attestation/ledger.zig");
 const att_receipt = @import("../attestation/receipt.zig");
+const replay_recorder = @import("../replay/recorder.zig");
 
 const max_agent_turns: usize = 10;
 const default_max_delegate_depth: usize = 3;
@@ -138,6 +140,14 @@ pub fn runLoop(
     var logger = obs.Logger.fromConfig(run_cfg, io);
     const decisions = decision_log.Logger.fromConfig(run_cfg, io);
     const ledger_enabled = opts.delegate_depth == 0;
+    var recorder = replay_recorder.TraceRecorder.init(
+        a,
+        io,
+        run_cfg.raw.security.workspace_root,
+        request_id,
+        opts.delegate_depth == 0,
+    );
+    defer recorder.deinit();
 
     var ledger = att_ledger.MerkleTree.init(a);
     defer ledger.deinit();
@@ -155,8 +165,17 @@ pub fn runLoop(
         tool_output_hashes.deinit();
     }
 
+    var cache = tools_cache.ToolCache.init(ta, io, run_cfg.raw.security.workspace_root);
+    defer cache.deinit();
+
     var b = try bundle_mod.build(ta, io, run_cfg, message);
     defer b.deinit(ta);
+
+    recorder.record(.run_start, 0, .{
+        .agent_id = active_agent.id,
+        .message = message,
+        .delegate_depth = opts.delegate_depth,
+    }) catch {};
 
     decisions.logAndRecord(ta, .{
         .ts_unix_ms = decision_log.nowUnixMs(io),
@@ -181,6 +200,9 @@ pub fn runLoop(
         .reason = "memory recall executed",
         .policy_hash = run_cfg.policy.policyHash(),
     }, ledger_ptr);
+    recorder.record(.memory_recall, 0, .{
+        .memory_root = run_cfg.raw.memory.root,
+    }) catch {};
 
     const provider_kind = @tagName(run_cfg.raw.provider_primary.kind);
     const provider_requires_network = run_cfg.raw.provider_primary.kind == .openai_compat;
@@ -198,6 +220,10 @@ pub fn runLoop(
             "allowed: provider does not require network",
         .policy_hash = run_cfg.policy.policyHash(),
     }, ledger_ptr);
+    recorder.record(.policy_decision, 0, .{
+        .decision = "provider.network",
+        .allowed = provider_network_allowed,
+    }) catch {};
     if (!provider_network_allowed) return error.ProviderNetworkNotAllowed;
 
     decisions.logAndRecord(ta, .{
@@ -348,6 +374,12 @@ pub fn runLoop(
             .turn = turn,
             .agent_id = active_agent.id,
         });
+        recorder.record(.provider_request, turn, .{
+            .kind = @tagName(run_cfg.raw.provider_primary.kind),
+            .model = run_cfg.raw.provider_primary.model,
+            .tools = tool_defs.len,
+            .messages = messages.items.len,
+        }) catch {};
 
         const resp = provider.chat(ta, io, .{
             .messages = messages.items,
@@ -380,6 +412,16 @@ pub fn runLoop(
             .total_tokens = resp.usage.total_tokens,
             .agent_id = active_agent.id,
         });
+        recorder.record(.provider_response, turn, .{
+            .finish_reason = @tagName(resp.finish_reason),
+            .content = resp.content,
+            .tool_calls = resp.tool_calls.len,
+            .usage = .{
+                .prompt_tokens = resp.usage.prompt_tokens,
+                .completion_tokens = resp.usage.completion_tokens,
+                .total_tokens = resp.usage.total_tokens,
+            },
+        }) catch {};
 
         if (opts.verbose) {
             verboseLog(io, "[verbose] turn={d} finish_reason={s} content_bytes={d} tool_calls={d} tokens={d}/{d}/{d}\n", .{
@@ -396,6 +438,10 @@ pub fn runLoop(
 
         // If no tool calls, we are done
         if (resp.finish_reason != .tool_calls or resp.tool_calls.len == 0) {
+            recorder.record(.run_end, turn, .{
+                .content = resp.content,
+                .turns = turn + 1,
+            }) catch {};
             const attestation = try finalizeAttestation(
                 a,
                 io,
@@ -409,6 +455,7 @@ pub fn runLoop(
                 tool_args_hashes.items,
                 tool_output_hashes.items,
             );
+            recorder.finalize(run_cfg, run_cfg.policy.policyHash(), b.prompt_hash_hex) catch {};
             return .{
                 .content = try a.dupe(u8, resp.content),
                 .turns = turn + 1,
@@ -427,6 +474,11 @@ pub fn runLoop(
         for (resp.tool_calls) |tc| {
             const args_hash = try hash_mod.sha256HexAlloc(a, tc.arguments);
             try tool_args_hashes.append(args_hash);
+            recorder.record(.tool_request, turn, .{
+                .tool = tc.name,
+                .tool_call_id = tc.id,
+                .arguments = tc.arguments,
+            }) catch {};
 
             if (try cancelRequested(opts)) {
                 logger.logJson(ta, .agent_run, request_id, .{
@@ -446,10 +498,22 @@ pub fn runLoop(
             });
 
             if (std.mem.eql(u8, tc.name, delegate_tool_name)) {
+                const delegate_args = parseDelegateArgs(ta, tc.arguments) catch null;
+                if (delegate_args) |da| {
+                    recorder.record(.delegation_start, turn, .{
+                        .target_agent = da.target_agent,
+                    }) catch {};
+                }
                 const delegate_json = handleDelegateToolCall(ta, io, run_cfg, request_id, b.prompt_hash_hex, active_agent, tc.arguments, opts, ledger_ptr) catch |e| {
                     const err_msg = try std.fmt.allocPrint(ta, "Tool execution error: {s}", .{@errorName(e)});
                     const out_hash = try hash_mod.sha256HexAlloc(a, err_msg);
                     try tool_output_hashes.append(out_hash);
+                    recorder.record(.tool_response, turn, .{
+                        .tool = tc.name,
+                        .tool_call_id = tc.id,
+                        .ok = false,
+                        .@"error" = @errorName(e),
+                    }) catch {};
                     logger.logJson(ta, .tool_run, request_id, .{
                         .tool = tc.name,
                         .tool_call_id = tc.id,
@@ -467,6 +531,18 @@ pub fn runLoop(
                 };
                 const out_hash = try hash_mod.sha256HexAlloc(a, delegate_json);
                 try tool_output_hashes.append(out_hash);
+                if (delegate_args) |da| {
+                    recorder.record(.delegation_end, turn, .{
+                        .target_agent = da.target_agent,
+                        .ok = true,
+                    }) catch {};
+                }
+                recorder.record(.tool_response, turn, .{
+                    .tool = tc.name,
+                    .tool_call_id = tc.id,
+                    .ok = true,
+                    .content = delegate_json,
+                }) catch {};
 
                 logger.logJson(ta, .tool_run, request_id, .{
                     .tool = tc.name,
@@ -488,11 +564,18 @@ pub fn runLoop(
             const tool_result = tools_runner.run(ta, io, run_cfg, request_id, tc.name, tc.arguments, .{
                 .prompt_hash = b.prompt_hash_hex,
                 .ledger = ledger_ptr,
+                .cache = &cache,
             }) catch |e| {
                 // Tool execution failed - send error back to LLM
                 const err_msg = try std.fmt.allocPrint(ta, "Tool execution error: {s}", .{@errorName(e)});
                 const out_hash = try hash_mod.sha256HexAlloc(a, err_msg);
                 try tool_output_hashes.append(out_hash);
+                recorder.record(.tool_response, turn, .{
+                    .tool = tc.name,
+                    .tool_call_id = tc.id,
+                    .ok = false,
+                    .@"error" = @errorName(e),
+                }) catch {};
 
                 logger.logJson(ta, .tool_run, request_id, .{
                     .tool = tc.name,
@@ -537,6 +620,12 @@ pub fn runLoop(
                 tool_result.stdout;
             const out_hash = try hash_mod.sha256HexAlloc(a, result_content);
             try tool_output_hashes.append(out_hash);
+            recorder.record(.tool_response, turn, .{
+                .tool = tc.name,
+                .tool_call_id = tc.id,
+                .ok = tool_result.ok,
+                .content = result_content,
+            }) catch {};
 
             try messages.append(.{
                 .role = .tool,
@@ -553,23 +642,29 @@ pub fn runLoop(
         .turns = max_agent_turns,
         .agent_id = active_agent.id,
     });
+    recorder.record(.run_end, max_agent_turns, .{
+        .content = "Agent reached maximum number of turns without completing.",
+        .turns = max_agent_turns,
+    }) catch {};
 
+    const attestation = try finalizeAttestation(
+        a,
+        io,
+        run_cfg,
+        request_id,
+        b.prompt_hash_hex,
+        ts_start_ms,
+        decision_log.nowUnixMs(io),
+        ledger_enabled,
+        &ledger,
+        tool_args_hashes.items,
+        tool_output_hashes.items,
+    );
+    recorder.finalize(run_cfg, run_cfg.policy.policyHash(), b.prompt_hash_hex) catch {};
     return .{
         .content = try a.dupe(u8, "Agent reached maximum number of turns without completing."),
         .turns = max_agent_turns,
-        .attestation = try finalizeAttestation(
-            a,
-            io,
-            run_cfg,
-            request_id,
-            b.prompt_hash_hex,
-            ts_start_ms,
-            decision_log.nowUnixMs(io),
-            ledger_enabled,
-            &ledger,
-            tool_args_hashes.items,
-            tool_output_hashes.items,
-        ),
+        .attestation = attestation,
     };
 }
 

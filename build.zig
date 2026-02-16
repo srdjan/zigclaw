@@ -3,6 +3,27 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const host = b.graph.host;
+
+    // Generate compile-time tool registry from plugin manifests.
+    const registry_gen = b.addExecutable(.{
+        .name = "zigclaw_registry_gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/registry_gen.zig"),
+            .target = host,
+            .optimize = optimize,
+        }),
+    });
+    const run_registry_gen = b.addRunArtifact(registry_gen);
+    run_registry_gen.addArgs(&.{
+        "--plugin-dir",
+        "plugins",
+        "--out",
+        "src/tools/registry_generated.zig",
+    });
+
+    const registry_step = b.step("registry", "Generate src/tools/registry_generated.zig");
+    registry_step.dependOn(&run_registry_gen.step);
 
     // --- Native executable
     const exe = b.addExecutable(.{
@@ -13,6 +34,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.step.dependOn(&run_registry_gen.step);
     b.installArtifact(exe);
 
     // Run step: `zig build run -- <args>`
@@ -29,6 +51,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    tests.step.dependOn(&run_registry_gen.step);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 

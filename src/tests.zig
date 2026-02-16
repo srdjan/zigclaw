@@ -5,8 +5,15 @@ const fs_util = @import("util/fs.zig");
 const pairing = @import("security/pairing.zig");
 const config = @import("config.zig");
 const policy_mod = @import("policy.zig");
+const policy_algebra = @import("policy/algebra.zig");
 const token_mod = @import("policy/token.zig");
 const att_receipt = @import("attestation/receipt.zig");
+const tool_cache = @import("tools/cache.zig");
+const tool_registry = @import("tools/registry.zig");
+const tool_registry_fp = @import("tools/registry_fingerprint.zig");
+const replay_capsule = @import("replay/capsule.zig");
+const replay_replayer = @import("replay/replayer.zig");
+const replay_diff = @import("replay/diff.zig");
 const queue_worker = @import("queue/worker.zig");
 
 // Helper: create a threaded Io suitable for tests that need file/network access.
@@ -57,6 +64,22 @@ fn parseLeadingTimestampMs(name: []const u8) !i64 {
 fn clockNowMs(io: std.Io) i64 {
     const ts = std.Io.Clock.now(.real, io);
     return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_ms));
+}
+
+comptime {
+    const parent = policy_algebra.CapabilityView{
+        .tools = &.{ "echo", "fs_read" },
+        .allow_network = false,
+        .write_paths = &.{"./tmp"},
+    };
+    const child = policy_algebra.CapabilityView{
+        .tools = &.{"echo"},
+        .allow_network = false,
+        .write_paths = &.{"./tmp/work"},
+    };
+    if (!policy_algebra.isSubsetOf(child, parent)) {
+        @compileError("policy algebra subset invariant failed for compile-time fixture");
+    }
 }
 
 test "commands.isCommandSafe denies separators" {
@@ -346,6 +369,86 @@ test "config parses static multi-agent orchestration" {
     try std.testing.expect(writer_ok);
 }
 
+test "config strict registry rejects unregistered preset tool" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const cfg_path = "tests/.tmp_strict_unknown_tool.toml";
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    const content =
+        \\config_version = 1
+        \\
+        \\[capabilities]
+        \\active_preset = "strict"
+        \\
+        \\[capabilities.presets.strict]
+        \\tools = ["tool_not_in_registry"]
+        \\allow_network = false
+        \\allow_write_paths = []
+        \\
+        \\[tools.registry]
+        \\strict = true
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = content });
+
+    try std.testing.expectError(error.UnregisteredTool, config.loadAndValidate(a, io, cfg_path));
+}
+
+test "config strict registry rejects delegation capability escalation" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const cfg_path = "tests/.tmp_strict_delegate_escalation.toml";
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    const content =
+        \\config_version = 1
+        \\
+        \\[capabilities]
+        \\active_preset = "readonly"
+        \\
+        \\[capabilities.presets.readonly]
+        \\tools = ["echo", "fs_read"]
+        \\allow_network = false
+        \\allow_write_paths = []
+        \\
+        \\[capabilities.presets.dev]
+        \\tools = ["echo", "fs_read", "fs_write"]
+        \\allow_network = true
+        \\allow_write_paths = ["./tmp"]
+        \\
+        \\[orchestration]
+        \\leader_agent = "planner"
+        \\
+        \\[agents.planner]
+        \\capability_preset = "readonly"
+        \\delegate_to = ["writer"]
+        \\
+        \\[agents.writer]
+        \\capability_preset = "dev"
+        \\delegate_to = []
+        \\
+        \\[tools.registry]
+        \\strict = true
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = content });
+
+    try std.testing.expectError(error.DelegationPresetEscalation, config.loadAndValidate(a, io, cfg_path));
+}
+
 test "capability token mint attenuates requested scope to parent capabilities" {
     const a = std.testing.allocator;
 
@@ -415,6 +518,111 @@ test "policy attenuation intersects child preset with capability token" {
     try std.testing.expectEqualStrings("./tmp/work", attenuated.active.allow_write_paths[0]);
     try std.testing.expect(!attenuated.active.allow_network);
     try std.testing.expect(!std.mem.eql(u8, child_policy.policyHash(), attenuated.policyHash()));
+}
+
+test "policy algebra enforces subset and computes intersections" {
+    const a = std.testing.allocator;
+
+    const parent = policy_algebra.CapabilityView{
+        .tools = &.{ "echo", "fs_read", "fs_write" },
+        .allow_network = true,
+        .write_paths = &.{ "./tmp", "./logs" },
+    };
+    const child = policy_algebra.CapabilityView{
+        .tools = &.{ "echo", "fs_read" },
+        .allow_network = false,
+        .write_paths = &.{ "./tmp/work" },
+    };
+
+    try std.testing.expect(policy_algebra.isSubsetOf(child, parent));
+    try std.testing.expect(!policy_algebra.isSubsetOf(parent, child));
+
+    var intersection = try policy_algebra.intersectAlloc(a, parent, child);
+    defer intersection.deinit(a);
+
+    try std.testing.expectEqual(@as(usize, 2), intersection.tools.len);
+    try std.testing.expectEqualStrings("echo", intersection.tools[0]);
+    try std.testing.expectEqualStrings("fs_read", intersection.tools[1]);
+    try std.testing.expect(!intersection.allow_network);
+    try std.testing.expectEqual(@as(usize, 1), intersection.write_paths.len);
+    try std.testing.expectEqualStrings("./tmp/work", intersection.write_paths[0]);
+}
+
+test "tool cache stores and returns cached values" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const ws = "tests/.tmp_tool_cache_store";
+    std.Io.Dir.cwd().deleteTree(io, ws) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, ws) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, ws);
+
+    var cache = tool_cache.ToolCache.init(a, io, ws);
+    defer cache.deinit();
+
+    try cache.store("k1", .{
+        .ok = true,
+        .data_json = "{\"x\":1}",
+        .stdout = "out",
+        .stderr = "",
+    });
+
+    const got = cache.lookup("k1") orelse return error.BadGolden;
+    try std.testing.expect(got.ok);
+    try std.testing.expectEqualStrings("{\"x\":1}", got.data_json);
+    try std.testing.expectEqualStrings("out", got.stdout);
+}
+
+test "tool cache key changes only after snapshot invalidation" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const ws = "tests/.tmp_tool_cache_key";
+    std.Io.Dir.cwd().deleteTree(io, ws) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, ws) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, ws);
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = "tests/.tmp_tool_cache_key/a.txt",
+        .data = "one",
+    });
+
+    var cache = tool_cache.ToolCache.init(a, io, ws);
+    defer cache.deinit();
+
+    const mounts = [_]policy_mod.Mount{
+        .{ .host_path = ws, .guest_path = "/workspace", .read_only = true },
+    };
+
+    const key1 = try cache.computeKey(a, "echo", "{\"msg\":\"hi\"}", mounts[0..]);
+    defer a.free(key1);
+    const key1b = try cache.computeKey(a, "echo", "{\"msg\":\"hi\"}", mounts[0..]);
+    defer a.free(key1b);
+    try std.testing.expectEqualStrings(key1, key1b);
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = "tests/.tmp_tool_cache_key/a.txt",
+        .data = "two",
+    });
+
+    const key2 = try cache.computeKey(a, "echo", "{\"msg\":\"hi\"}", mounts[0..]);
+    defer a.free(key2);
+    try std.testing.expectEqualStrings(key1, key2);
+
+    cache.invalidateWorkspaceSnapshot();
+    const key3 = try cache.computeKey(a, "echo", "{\"msg\":\"hi\"}", mounts[0..]);
+    defer a.free(key3);
+    try std.testing.expect(!std.mem.eql(u8, key1, key3));
 }
 
 test "queue enqueue-agent then worker once produces outgoing result" {
@@ -823,10 +1031,10 @@ test "manifest load + args schema validation (echo)" {
     defer owned.deinit(a);
 
     // valid
-    try tool_schema.validateArgs(owned.manifest.args, "{\"text\":\"hi\"}");
+    try tool_schema.validateArgs(owned.manifest.args, "{\"text\":\"hi\"}", false);
 
     // missing required
-    try std.testing.expectError(tool_schema.ValidationError.MissingRequired, tool_schema.validateArgs(owned.manifest.args, "{}"));
+    try std.testing.expectError(tool_schema.ValidationError.MissingRequired, tool_schema.validateArgs(owned.manifest.args, "{}", false));
 
     // too long
     const big = try a.alloc(u8, 1100);
@@ -834,7 +1042,14 @@ test "manifest load + args schema validation (echo)" {
     @memset(big, 'a');
     const args = try std.fmt.allocPrint(a, "{{\"text\":\"{s}\"}}", .{big});
     defer a.free(args);
-    try std.testing.expectError(tool_schema.ValidationError.TooLong, tool_schema.validateArgs(owned.manifest.args, args));
+    try std.testing.expectError(tool_schema.ValidationError.TooLong, tool_schema.validateArgs(owned.manifest.args, args, false));
+
+    // unknown key is rejected in strict mode only
+    try tool_schema.validateArgs(owned.manifest.args, "{\"text\":\"ok\",\"extra\":true}", false);
+    try std.testing.expectError(
+        tool_schema.ValidationError.UnknownKey,
+        tool_schema.validateArgs(owned.manifest.args, "{\"text\":\"ok\",\"extra\":true}", true),
+    );
 }
 
 test "manifest load + args schema validation (fs_read)" {
@@ -849,9 +1064,30 @@ test "manifest load + args schema validation (fs_read)" {
     var owned = try tool_manifest.loadManifest(a, io, "tests/fixtures/fs_read.toml");
     defer owned.deinit(a);
 
-    try tool_schema.validateArgs(owned.manifest.args, "{\"path\":\"/workspace/README.md\",\"max_bytes\":65536}");
-    try std.testing.expectError(tool_schema.ValidationError.MissingRequired, tool_schema.validateArgs(owned.manifest.args, "{\"max_bytes\":1}"));
-    try std.testing.expectError(tool_schema.ValidationError.OutOfRange, tool_schema.validateArgs(owned.manifest.args, "{\"path\":\"/workspace/x\",\"max_bytes\":0}"));
+    try tool_schema.validateArgs(owned.manifest.args, "{\"path\":\"/workspace/README.md\",\"max_bytes\":65536}", false);
+    try std.testing.expectError(tool_schema.ValidationError.MissingRequired, tool_schema.validateArgs(owned.manifest.args, "{\"max_bytes\":1}", false));
+    try std.testing.expectError(tool_schema.ValidationError.OutOfRange, tool_schema.validateArgs(owned.manifest.args, "{\"path\":\"/workspace/x\",\"max_bytes\":0}", false));
+}
+
+test "compiled registry fingerprints match manifests" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    try std.testing.expect(tool_registry.entries.len >= 5);
+
+    var owned = try tool_manifest.loadManifest(a, io, "plugins/echo/tool.toml");
+    defer owned.deinit(a);
+    const fp = try tool_registry_fp.schemaFingerprintHexAlloc(a, owned.manifest.args);
+    defer a.free(fp);
+
+    const reg = tool_registry.find("echo") orelse return error.BadGolden;
+    try std.testing.expectEqualStrings(fp, reg.schema_fingerprint_hex);
+    try std.testing.expect(!reg.requires_network);
 }
 
 const agent_prompt = @import("agent/prompt.zig");
@@ -1432,6 +1668,21 @@ test "gateway agent response includes attestation and receipts endpoint returns 
         const rid = obj.get("request_id") orelse return error.BadGolden;
         try std.testing.expect(rid == .string);
         try std.testing.expectEqualStrings("http_req_att_1", rid.string);
+    }
+
+    var req_capsule = try makeGatewayRequest(a, "GET", "/v1/capsules/http_req_att_1", token, "");
+    defer req_capsule.deinit(a);
+    var resp_capsule = try gw_routes.handle(a, io, &app, vcq, req_capsule, token, "http_req_att_3");
+    defer resp_capsule.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_capsule.status);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_capsule.body, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const events = obj.get("events") orelse return error.BadGolden;
+        try std.testing.expect(events == .array);
+        try std.testing.expect(events.array.items.len > 0);
     }
 }
 
@@ -2081,6 +2332,110 @@ test "runLoop writes execution receipt and verify succeeds for event index" {
         const obj = parsed.value.object;
         const valid = obj.get("valid") orelse return error.BadGolden;
         try std.testing.expect(valid == .bool and valid.bool);
+    }
+}
+
+test "runLoop writes replay capsule and capsule replay returns run_end content" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const ws_dir = "tests/.tmp_capsule_replay";
+    std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, ws_dir);
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.logging.enabled = false;
+    vcq.raw.security.workspace_root = ws_dir;
+
+    var res = try agent_loop.runLoop(a, io, vcq, "hello capsule", "req_capsule_1", .{});
+    defer res.deinit(a);
+
+    const capsule_json = try replay_capsule.readCapsuleJsonAlloc(a, io, ws_dir, "req_capsule_1");
+    defer a.free(capsule_json);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, capsule_json, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const events = obj.get("events") orelse return error.BadGolden;
+        try std.testing.expect(events == .array);
+        try std.testing.expect(events.array.items.len > 0);
+    }
+
+    const replay_json = try replay_replayer.replayFromCapsuleJsonAlloc(a, capsule_json);
+    defer a.free(replay_json);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, replay_json, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const replayed = obj.get("replayed") orelse return error.BadGolden;
+        try std.testing.expect(replayed == .bool and replayed.bool);
+        const content = obj.get("content") orelse return error.BadGolden;
+        try std.testing.expect(content == .string);
+        try std.testing.expectEqualStrings(res.content, content.string);
+    }
+}
+
+test "capsule diff reports first divergence between two runs" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const ws_dir = "tests/.tmp_capsule_diff";
+    std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, ws_dir);
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.observability.enabled = false;
+    vcq.raw.logging.enabled = false;
+    vcq.raw.security.workspace_root = ws_dir;
+
+    var r1 = try agent_loop.runLoop(a, io, vcq, "hello one", "req_capsule_a", .{});
+    defer r1.deinit(a);
+    var r2 = try agent_loop.runLoop(a, io, vcq, "hello two", "req_capsule_b", .{});
+    defer r2.deinit(a);
+
+    const a_json = try replay_capsule.readCapsuleJsonAlloc(a, io, ws_dir, "req_capsule_a");
+    defer a.free(a_json);
+    const b_json = try replay_capsule.readCapsuleJsonAlloc(a, io, ws_dir, "req_capsule_b");
+    defer a.free(b_json);
+
+    const diff_json = try replay_diff.diffCapsulesJsonAlloc(a, a_json, b_json);
+    defer a.free(diff_json);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, diff_json, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const equal = obj.get("equal") orelse return error.BadGolden;
+        try std.testing.expect(equal == .bool and !equal.bool);
+        const first = obj.get("first_diff_index") orelse return error.BadGolden;
+        try std.testing.expect(first == .integer);
     }
 }
 

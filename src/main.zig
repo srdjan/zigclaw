@@ -587,6 +587,68 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "replay")) {
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
+
+        if (std.mem.eql(u8, sub, "capture")) {
+            const rid = flagValue(argv, "--request-id") orelse return error.InvalidArgs;
+            const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+            var validated = try app.loadConfig(cfg_path);
+            defer validated.deinit(a);
+
+            const capsule_json = try @import("replay/capsule.zig").readCapsuleJsonAlloc(
+                a,
+                io,
+                validated.raw.security.workspace_root,
+                rid,
+            );
+            defer a.free(capsule_json);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{capsule_json});
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "run")) {
+            const capsule_path = flagValue(argv, "--capsule") orelse return error.InvalidArgs;
+            const capsule_json = try std.Io.Dir.cwd().readFileAlloc(io, capsule_path, a, std.Io.Limit.limited(8 * 1024 * 1024));
+            defer a.free(capsule_json);
+
+            const out = try @import("replay/replayer.zig").replayFromCapsuleJsonAlloc(a, capsule_json);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "diff")) {
+            const a_path = flagValue(argv, "--a") orelse return error.InvalidArgs;
+            const b_path = flagValue(argv, "--b") orelse return error.InvalidArgs;
+
+            const left = try std.Io.Dir.cwd().readFileAlloc(io, a_path, a, std.Io.Limit.limited(8 * 1024 * 1024));
+            defer a.free(left);
+            const right = try std.Io.Dir.cwd().readFileAlloc(io, b_path, a, std.Io.Limit.limited(8 * 1024 * 1024));
+            defer a.free(right);
+
+            const out = try @import("replay/diff.zig").diffCapsulesJsonAlloc(a, left, right);
+            defer a.free(out);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
+
+        try usage(io);
+        return;
+    }
+
     if (std.mem.eql(u8, cmd, "gateway")) {
         const sub: []const u8 = if (argv.len >= 3) argv[2] else "start";
         if (!std.mem.eql(u8, sub, "start")) {
@@ -707,6 +769,9 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
         \\wasmtime_path = "wasmtime"
         \\plugin_dir = "./zig-out/bin"
         \\
+        \\[tools.registry]
+        \\strict = false
+        \\
         \\[queue]
         \\dir = "./.zigclaw/queue"
         \\poll_ms = 1000
@@ -763,6 +828,7 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io) !void {
     dir.createDirPath(io, ".zigclaw/memory/templates") catch {};
     dir.createDirPath(io, ".zigclaw/logs") catch {};
     dir.createDirPath(io, ".zigclaw/receipts") catch {};
+    dir.createDirPath(io, ".zigclaw/capsules") catch {};
     dir.createDirPath(io, ".zigclaw/queue/incoming") catch {};
     dir.createDirPath(io, ".zigclaw/queue/processing") catch {};
     dir.createDirPath(io, ".zigclaw/queue/outgoing") catch {};
@@ -817,6 +883,9 @@ fn usage(io: std.Io) !void {
         \\  zigclaw policy explain (--tool <name> | --mount <path> | --command "cmd") [--config zigclaw.toml]
         \\  zigclaw attest <request_id> [--config zigclaw.toml]
         \\  zigclaw attest verify --request-id <id> --event-index <n> [--config zigclaw.toml]
+        \\  zigclaw replay capture --request-id <id> [--config zigclaw.toml]
+        \\  zigclaw replay run --capsule <path>
+        \\  zigclaw replay diff --a <path1> --b <path2>
         \\  zigclaw gateway start [--bind 127.0.0.1] [--port 8787] [--config zigclaw.toml]
         \\
     );

@@ -9,13 +9,11 @@ ZigClaw is a local-first Zig agent runtime with:
 - JSONL observability + decision/audit logs
 - tamper-evident execution receipts and replay capsules
 
-Reference project: TinyClaw by `jlia0` (`https://github.com/jlia0/tinyclaw`).
-Original inspiration: `zeroclaw`.
-
-This README reflects the current implementation in `src/`.
+>Reference projects: 
+>TinyClaw by `jlia0` [tyniclaw](https://github.com/jlia0/tinyclaw) and original inspiration: [zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) from `zeroclaw-labs`.
 
 ## Requirements
-- Zig (project currently builds/tests with Zig 0.14-era std APIs)
+- Zig nightly (0.16-dev; tracks latest std APIs)
 - `wasmtime` in `PATH` for WASI tools (`native = false` manifests)
 - `git` in `PATH` for `zigclaw git init|status|sync`
 - `curl` in `PATH` for:

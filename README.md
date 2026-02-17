@@ -400,6 +400,8 @@ Additional trigger-style endpoint:
 - `POST /v1/events` creates/updates primitive tasks from event payloads (`title`/`message`, `priority`, `owner`, `project`, `tags`, optional `idempotency_key`).
 - `GET /v1/receipts/<request_id>` returns attestation receipt JSON (when present).
 - `GET /v1/capsules/<request_id>` returns replay capsule JSON (when present).
+- `GET /v1/queue/requests?state=all|queued|processing|completed|canceled&limit=N` returns queue request listings for UI/operators.
+- `GET /v1/runs/<request_id>/summary` returns queue state + receipt/capsule paths and availability flags.
 - `GET /ops?token=<gateway-token>[&limit=N&interval_ms=2000&view=state|full]` serves a lightweight auto-refreshing ops dashboard with filters.
 - `GET /v1/ops?limit=N&view=state|full` returns the dashboard snapshot as JSON (auth via bearer token; browser UI can use `?token=`).
 
@@ -417,6 +419,8 @@ curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/tools/echo
 curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"tool":"echo","args":{"text":"hi"}}' \
   http://127.0.0.1:8787/v1/tools/run
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/queue/requests?state=all\&limit=20
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/runs/req_demo_1/summary
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/receipts/req_demo_1
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/capsules/req_demo_1
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/ops

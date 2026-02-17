@@ -54,6 +54,8 @@ This document reflects the current implementation in `src/`.
 - Request-size and optional rate-limit checks happen before auth-protected route handling.
 - `POST /v1/events` can convert event payloads into primitive tasks with idempotency support.
 - `GET /v1/receipts/<request_id>` and `GET /v1/capsules/<request_id>` expose attestation/replay artifacts.
+- `GET /v1/queue/requests` provides queue listings for operator UIs/scripts.
+- `GET /v1/runs/<request_id>/summary` provides receipt/capsule-aware run summaries.
 - Tool routes now return nested JSON values (arrays/objects) rather than JSON-encoded strings.
 - Lightweight ops dashboard routes are available at `/ops` (HTML) and `/v1/ops` (JSON snapshot).
 

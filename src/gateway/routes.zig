@@ -301,9 +301,27 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         return .{ .status = 200, .body = body };
     }
 
+    if (std.mem.eql(u8, req.method, "GET") and std.mem.eql(u8, path, "/v1/queue/requests")) {
+        const limit: usize = if (queryValue(query, "limit")) |s| std.fmt.parseInt(usize, s, 10) catch 50 else 50;
+        const filter = parseQueueRequestsFilter(queryValue(query, "state")) orelse return jsonError(a, 400, request_id, "invalid queue state filter");
+        const body = queue_worker.listRequestsJsonAlloc(a, io, cfg, @min(limit, 200), filter) catch |e| switch (e) {
+            else => return jsonError(a, 500, request_id, @errorName(e)),
+        };
+        return .{ .status = 200, .body = body };
+    }
+
     if (std.mem.eql(u8, req.method, "POST") and std.mem.startsWith(u8, path, "/v1/requests/") and std.mem.endsWith(u8, path, "/cancel")) {
         const rid = requestIdFromCancelPath(path) orelse return jsonError(a, 400, request_id, "request id required");
         const body = queue_worker.cancelRequestJsonAlloc(a, io, cfg, rid) catch |e| switch (e) {
+            error.InvalidArgs => return jsonError(a, 400, request_id, @errorName(e)),
+            else => return jsonError(a, 500, request_id, @errorName(e)),
+        };
+        return .{ .status = 200, .body = body };
+    }
+
+    if (std.mem.eql(u8, req.method, "GET") and std.mem.startsWith(u8, path, "/v1/runs/") and std.mem.endsWith(u8, path, "/summary")) {
+        const rid = requestIdFromRunSummaryPath(path) orelse return jsonError(a, 400, request_id, "request id required");
+        const body = queue_worker.runSummaryJsonAlloc(a, io, cfg, rid) catch |e| switch (e) {
             error.InvalidArgs => return jsonError(a, 400, request_id, @errorName(e)),
             else => return jsonError(a, 500, request_id, @errorName(e)),
         };
@@ -713,6 +731,16 @@ fn parseOpsView(raw: ?[]const u8) OpsView {
     return .full;
 }
 
+fn parseQueueRequestsFilter(raw: ?[]const u8) ?queue_worker.RequestListFilter {
+    const v = raw orelse return .all;
+    if (std.ascii.eqlIgnoreCase(v, "all")) return .all;
+    if (std.ascii.eqlIgnoreCase(v, "queued")) return .queued;
+    if (std.ascii.eqlIgnoreCase(v, "processing")) return .processing;
+    if (std.ascii.eqlIgnoreCase(v, "completed")) return .completed;
+    if (std.ascii.eqlIgnoreCase(v, "canceled")) return .canceled;
+    return null;
+}
+
 fn opsSnapshotJsonAlloc(
     a: std.mem.Allocator,
     io: std.Io,
@@ -982,6 +1010,19 @@ fn getJsonInt(obj: std.json.ObjectMap, key: []const u8) ?i64 {
 fn requestIdFromCancelPath(path: []const u8) ?[]const u8 {
     const prefix = "/v1/requests/";
     const suffix = "/cancel";
+    if (!std.mem.startsWith(u8, path, prefix)) return null;
+    if (!std.mem.endsWith(u8, path, suffix)) return null;
+    if (path.len <= prefix.len + suffix.len) return null;
+
+    const rid = path[prefix.len .. path.len - suffix.len];
+    if (rid.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, rid, '/') != null) return null;
+    return rid;
+}
+
+fn requestIdFromRunSummaryPath(path: []const u8) ?[]const u8 {
+    const prefix = "/v1/runs/";
+    const suffix = "/summary";
     if (!std.mem.startsWith(u8, path, prefix)) return null;
     if (!std.mem.endsWith(u8, path, suffix)) return null;
     if (path.len <= prefix.len + suffix.len) return null;

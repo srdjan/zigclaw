@@ -46,12 +46,16 @@ zig-out/bin/zigclaw gateway start --bind 127.0.0.1 --port 8787 --config zigclaw.
   - `200` -> cancel result JSON
 - `GET /v1/queue/metrics`
   - `200` -> queue metric counters
+- `GET /v1/queue/requests?state=all|queued|processing|completed|canceled&limit=N`
+  - `200` -> `{ "now_ms": N, "filter": "...", "limit": N, "total": N, "items": [ { "request_id": "...", "state": "...", "file": "...", "ts_ms": N, ... } ] }`
 - `GET /v1/ops`
   - query: `limit=N` (1-50), `view=full|state`
   - `200` -> full: `{ "request_id": "...", "generated_at_ms": N, "view": "full", "queue": {...}, "audit_summary": {...}, "recent_receipts": [...], "recent_capsules": [...] }`
   - `200` -> state: `{ "request_id": "...", "generated_at_ms": N, "view": "state", "state": "idle|queued|busy", "queue": {...} }`
 - `GET /ops[?token=<gateway-token>&limit=N&interval_ms=2000&view=full|state]`
   - `200` -> lightweight HTML dashboard that polls `/v1/ops` and supports client-side filter controls
+- `GET /v1/runs/<request_id>/summary`
+  - `200` -> `{ "request_id": "...", "state": "...", "status": {...}, "status_path": "...", "receipt_path": "...", "receipt_exists": bool, "receipt_url": "...", "capsule_path": "...", "capsule_exists": bool, "capsule_url": "..." }`
 - `GET /v1/receipts/<request_id>`
   - `200` -> attestation receipt JSON
   - `404` -> `{ "request_id": "...", "error": "FileNotFound" }`

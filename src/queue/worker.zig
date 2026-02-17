@@ -13,6 +13,7 @@ pub const WorkerOptions = struct {
 
 const QueueState = enum { queued, processing, completed, canceled, not_found };
 const cancel_marker_suffix = ".cancel";
+pub const RequestListFilter = enum { all, queued, processing, completed, canceled };
 
 const JobKind = enum { agent };
 
@@ -236,6 +237,169 @@ pub fn cancelRequestJsonAlloc(
     return try aw.toOwnedSlice();
 }
 
+const RequestListEntry = struct {
+    request_id: []u8,
+    file: []u8,
+    state: QueueState,
+    ts_ms: i64,
+    due_ms: ?i64 = null,
+    ready: ?bool = null,
+    cancel_pending: bool = false,
+
+    fn deinit(self: RequestListEntry, a: std.mem.Allocator) void {
+        a.free(self.request_id);
+        a.free(self.file);
+    }
+};
+
+pub fn listRequestsJsonAlloc(
+    a: std.mem.Allocator,
+    io: std.Io,
+    cfg: config.ValidatedConfig,
+    limit: usize,
+    filter: RequestListFilter,
+) ![]u8 {
+    const resolved = try resolvePaths(a, cfg);
+    defer resolved.deinit(a);
+    try ensureDirs(io, resolved);
+
+    const now = nowMs(io);
+    var entries = std.array_list.Managed(RequestListEntry).init(a);
+    defer {
+        for (entries.items) |it| it.deinit(a);
+        entries.deinit();
+    }
+
+    try collectRequestEntries(a, io, resolved, resolved.incoming, .queued, now, &entries);
+    try collectRequestEntries(a, io, resolved, resolved.processing, .processing, now, &entries);
+    try collectRequestEntries(a, io, resolved, resolved.outgoing, .completed, now, &entries);
+    try collectRequestEntries(a, io, resolved, resolved.canceled, .canceled, now, &entries);
+
+    std.sort.block(RequestListEntry, entries.items, {}, struct {
+        fn gt(_: void, lhs: RequestListEntry, rhs: RequestListEntry) bool {
+            if (lhs.ts_ms != rhs.ts_ms) return lhs.ts_ms > rhs.ts_ms;
+            return std.mem.order(u8, lhs.file, rhs.file) == .gt;
+        }
+    }.gt);
+
+    var total: usize = 0;
+    for (entries.items) |it| {
+        if (requestListMatchesFilter(it.state, filter)) total += 1;
+    }
+    const capped = @min(limit, total);
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+    try stream.beginObject();
+    try stream.objectField("now_ms");
+    try stream.write(now);
+    try stream.objectField("filter");
+    try stream.write(@tagName(filter));
+    try stream.objectField("limit");
+    try stream.write(limit);
+    try stream.objectField("total");
+    try stream.write(total);
+    try stream.objectField("items");
+    try stream.beginArray();
+    var written: usize = 0;
+    for (entries.items) |it| {
+        if (!requestListMatchesFilter(it.state, filter)) continue;
+        if (written >= capped) break;
+        try stream.beginObject();
+        try stream.objectField("request_id");
+        try stream.write(it.request_id);
+        try stream.objectField("state");
+        try stream.write(@tagName(it.state));
+        try stream.objectField("file");
+        try stream.write(it.file);
+        try stream.objectField("ts_ms");
+        try stream.write(it.ts_ms);
+        if (it.due_ms) |due_ms| {
+            try stream.objectField("due_ms");
+            try stream.write(due_ms);
+        }
+        if (it.ready) |ready| {
+            try stream.objectField("ready");
+            try stream.write(ready);
+        }
+        if (it.state == .processing) {
+            try stream.objectField("cancel_pending");
+            try stream.write(it.cancel_pending);
+        }
+        try stream.endObject();
+        written += 1;
+    }
+    try stream.endArray();
+    try stream.endObject();
+    return try aw.toOwnedSlice();
+}
+
+pub fn runSummaryJsonAlloc(
+    a: std.mem.Allocator,
+    io: std.Io,
+    cfg: config.ValidatedConfig,
+    request_id: []const u8,
+) ![]u8 {
+    if (request_id.len == 0) return error.InvalidArgs;
+
+    const status_json = try statusJsonAlloc(a, io, cfg, request_id, false);
+    defer a.free(status_json);
+
+    var status_parsed = try std.json.parseFromSlice(std.json.Value, a, status_json, .{});
+    defer status_parsed.deinit();
+    if (status_parsed.value != .object) return error.InvalidJson;
+    const state_v = status_parsed.value.object.get("state") orelse return error.InvalidJson;
+    if (state_v != .string) return error.InvalidJson;
+
+    const receipt_path = try std.fmt.allocPrint(a, "{s}/.zigclaw/receipts/{s}.json", .{
+        cfg.raw.security.workspace_root,
+        request_id,
+    });
+    defer a.free(receipt_path);
+    const capsule_path = try std.fmt.allocPrint(a, "{s}/.zigclaw/capsules/{s}.json", .{
+        cfg.raw.security.workspace_root,
+        request_id,
+    });
+    defer a.free(capsule_path);
+    const status_path = try std.fmt.allocPrint(a, "/v1/requests/{s}", .{request_id});
+    defer a.free(status_path);
+    const receipt_url = try std.fmt.allocPrint(a, "/v1/receipts/{s}", .{request_id});
+    defer a.free(receipt_url);
+    const capsule_url = try std.fmt.allocPrint(a, "/v1/capsules/{s}", .{request_id});
+    defer a.free(capsule_url);
+
+    const receipt_exists = if (std.Io.Dir.cwd().statFile(io, receipt_path, .{})) |_| true else |_| false;
+    const capsule_exists = if (std.Io.Dir.cwd().statFile(io, capsule_path, .{})) |_| true else |_| false;
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+    try stream.beginObject();
+    try stream.objectField("request_id");
+    try stream.write(request_id);
+    try stream.objectField("state");
+    try stream.write(state_v.string);
+    try stream.objectField("status");
+    try stream.write(status_parsed.value);
+    try stream.objectField("status_path");
+    try stream.write(status_path);
+    try stream.objectField("receipt_path");
+    try stream.write(receipt_path);
+    try stream.objectField("receipt_exists");
+    try stream.write(receipt_exists);
+    try stream.objectField("receipt_url");
+    try stream.write(receipt_url);
+    try stream.objectField("capsule_path");
+    try stream.write(capsule_path);
+    try stream.objectField("capsule_exists");
+    try stream.write(capsule_exists);
+    try stream.objectField("capsule_url");
+    try stream.write(capsule_url);
+    try stream.endObject();
+    return try aw.toOwnedSlice();
+}
+
 pub fn runWorker(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, opts: WorkerOptions) !void {
     const resolved = try resolvePaths(a, cfg);
     defer resolved.deinit(a);
@@ -317,6 +481,83 @@ fn requestIdExists(io: std.Io, p: QueuePaths, request_id: []const u8) !bool {
     if (try dirContainsRequest(io, p.outgoing, request_id)) return true;
     if (try dirContainsRequest(io, p.canceled, request_id)) return true;
     return false;
+}
+
+fn collectRequestEntries(
+    a: std.mem.Allocator,
+    io: std.Io,
+    p: QueuePaths,
+    dir_path: []const u8,
+    state: QueueState,
+    now_ms: i64,
+    out: *std.array_list.Managed(RequestListEntry),
+) !void {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        if (!std.mem.endsWith(u8, ent.name, ".json")) continue;
+
+        const rid = try requestIdFromFileNameAlloc(a, ent.name) orelse continue;
+        errdefer a.free(rid);
+        const file = try a.dupe(u8, ent.name);
+        errdefer a.free(file);
+
+        const ts = fileTimestampMs(ent.name) orelse now_ms;
+        var item = RequestListEntry{
+            .request_id = rid,
+            .file = file,
+            .state = state,
+            .ts_ms = ts,
+        };
+
+        if (state == .queued) {
+            item.due_ms = ts;
+            item.ready = ts <= now_ms;
+        } else if (state == .processing) {
+            const marker_path = try cancelMarkerPathAlloc(a, p, rid);
+            defer a.free(marker_path);
+            item.cancel_pending = hasCancelMarkerAtPath(io, marker_path);
+        }
+
+        try out.append(item);
+    }
+}
+
+fn requestIdFromFileNameAlloc(a: std.mem.Allocator, name: []const u8) !?[]u8 {
+    if (!std.mem.endsWith(u8, name, ".json")) return null;
+    const base = name[0 .. name.len - ".json".len];
+    const sep = std.mem.indexOfScalar(u8, base, '_') orelse return null;
+    if (sep + 1 >= base.len) return null;
+
+    var rid_end = base.len;
+    if (std.mem.lastIndexOf(u8, base, "_retry")) |retry_idx| {
+        if (retry_idx > sep) {
+            const suffix = base[retry_idx + "_retry".len ..];
+            if (suffix.len > 0 and isAllDigits(suffix)) rid_end = retry_idx;
+        }
+    }
+    if (rid_end <= sep + 1) return null;
+    return try a.dupe(u8, base[sep + 1 .. rid_end]);
+}
+
+fn isAllDigits(s: []const u8) bool {
+    for (s) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
+
+fn requestListMatchesFilter(state: QueueState, filter: RequestListFilter) bool {
+    return switch (filter) {
+        .all => state == .queued or state == .processing or state == .completed or state == .canceled,
+        .queued => state == .queued,
+        .processing => state == .processing,
+        .completed => state == .completed,
+        .canceled => state == .canceled,
+    };
 }
 
 fn dirContainsRequest(io: std.Io, dir_path: []const u8, request_id: []const u8) !bool {

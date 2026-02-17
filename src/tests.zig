@@ -1680,6 +1680,148 @@ test "gateway queue metrics route returns queue counts" {
     try std.testing.expect(incoming_total_v.integer >= 1);
 }
 
+test "gateway queue requests route lists queue entries and supports state filter" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_gateway_queue_list";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.observability.enabled = false;
+
+    const rid_a = try queue_worker.enqueueAgent(a, io, vcq, "gateway list a", null, "gw_list_req_a");
+    defer a.free(rid_a);
+    const rid_b = try queue_worker.enqueueAgent(a, io, vcq, "gateway list b", null, "gw_list_req_b");
+    defer a.free(rid_b);
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    const token = "tok_gateway_list";
+    var req = try makeGatewayRequest(a, "GET", "/v1/queue/requests?state=queued&limit=10", token, "");
+    defer req.deinit(a);
+    var resp = try gw_routes.handle(a, io, &app, vcq, req, token, "http_req_ql1");
+    defer resp.deinit(a);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, resp.body, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        const obj = parsed.value.object;
+        const filter_v = obj.get("filter") orelse return error.BadGolden;
+        try std.testing.expect(filter_v == .string);
+        try std.testing.expectEqualStrings("queued", filter_v.string);
+        const total_v = obj.get("total") orelse return error.BadGolden;
+        try std.testing.expect(total_v == .integer);
+        try std.testing.expect(total_v.integer >= 2);
+        const items_v = obj.get("items") orelse return error.BadGolden;
+        try std.testing.expect(items_v == .array);
+        try std.testing.expect(items_v.array.items.len >= 2);
+        for (items_v.array.items) |it| {
+            try std.testing.expect(it == .object);
+            const state = it.object.get("state") orelse return error.BadGolden;
+            try std.testing.expect(state == .string);
+            try std.testing.expectEqualStrings("queued", state.string);
+        }
+    }
+
+    var req_invalid = try makeGatewayRequest(a, "GET", "/v1/queue/requests?state=bogus", token, "");
+    defer req_invalid.deinit(a);
+    var resp_invalid = try gw_routes.handle(a, io, &app, vcq, req_invalid, token, "http_req_ql2");
+    defer resp_invalid.deinit(a);
+    try std.testing.expectEqual(@as(u16, 400), resp_invalid.status);
+}
+
+test "gateway run summary route returns queue status and artifact paths" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const queue_dir = "tests/.tmp_gateway_run_summary";
+    std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, queue_dir) catch {};
+
+    const ws_dir = "tests/.tmp_gateway_run_summary_ws";
+    std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, ws_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, ws_dir);
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.queue.dir = queue_dir;
+    vcq.raw.queue.poll_ms = 1;
+    vcq.raw.queue.max_retries = 0;
+    vcq.raw.security.workspace_root = ws_dir;
+    vcq.raw.observability.enabled = false;
+
+    const rid = try queue_worker.enqueueAgent(a, io, vcq, "gateway summary", null, "gw_summary_req_1");
+    defer a.free(rid);
+    try queue_worker.runWorker(a, io, vcq, .{ .once = true });
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    const token = "tok_gateway_run_summary";
+    var req = try makeGatewayRequest(a, "GET", "/v1/runs/gw_summary_req_1/summary", token, "");
+    defer req.deinit(a);
+    var resp = try gw_routes.handle(a, io, &app, vcq, req, token, "http_req_rs1");
+    defer resp.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, resp.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const obj = parsed.value.object;
+
+    const rid_v = obj.get("request_id") orelse return error.BadGolden;
+    try std.testing.expect(rid_v == .string);
+    try std.testing.expectEqualStrings("gw_summary_req_1", rid_v.string);
+
+    const state_v = obj.get("state") orelse return error.BadGolden;
+    try std.testing.expect(state_v == .string);
+    try std.testing.expectEqualStrings("completed", state_v.string);
+
+    const status_v = obj.get("status") orelse return error.BadGolden;
+    try std.testing.expect(status_v == .object);
+    const status_state = status_v.object.get("state") orelse return error.BadGolden;
+    try std.testing.expect(status_state == .string);
+    try std.testing.expectEqualStrings("completed", status_state.string);
+
+    const receipt_path_v = obj.get("receipt_path") orelse return error.BadGolden;
+    try std.testing.expect(receipt_path_v == .string);
+    try std.testing.expect(std.mem.indexOf(u8, receipt_path_v.string, ".zigclaw/receipts/gw_summary_req_1.json") != null);
+
+    const capsule_path_v = obj.get("capsule_path") orelse return error.BadGolden;
+    try std.testing.expect(capsule_path_v == .string);
+    try std.testing.expect(std.mem.indexOf(u8, capsule_path_v.string, ".zigclaw/capsules/gw_summary_req_1.json") != null);
+}
+
 test "gateway agent response includes attestation and receipts endpoint returns receipt" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

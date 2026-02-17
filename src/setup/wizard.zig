@@ -2,7 +2,7 @@ const std = @import("std");
 const prompts = @import("prompts.zig");
 const config = @import("../config.zig");
 
-pub fn run(a: std.mem.Allocator, io: std.Io) !void {
+pub fn run(a: std.mem.Allocator, io: std.Io) !bool {
     var obuf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
 
@@ -18,7 +18,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io) !void {
         if (!overwrite) {
             try ow.interface.writeAll("Aborted.\n");
             try ow.flush();
-            return;
+            return false;
         }
     }
 
@@ -150,7 +150,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io) !void {
     dir.writeFile(io, .{ .sub_path = "zigclaw.toml", .data = toml_bytes }) catch |e| {
         try ow.interface.print("Failed to write zigclaw.toml: {s}\n", .{@errorName(e)});
         try ow.flush();
-        return;
+        return false;
     };
 
     // --- Scaffold directories ---
@@ -182,6 +182,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io) !void {
     try ow.flush();
 
     validated.deinit(a);
+    return true;
 }
 
 fn dupeStrs(a: std.mem.Allocator, items: []const []const u8) ![]const []const u8 {

@@ -143,11 +143,22 @@ pub fn writeJson(io: std.Io, stream: *std.Io.net.Stream, status_code: u16, body:
 }
 
 pub fn writeJsonWithHeaders(io: std.Io, stream: *std.Io.net.Stream, status_code: u16, body: []const u8, extra: []const Header) !void {
+    return writeResponseWithHeaders(io, stream, status_code, "application/json", body, extra);
+}
+
+pub fn writeResponseWithHeaders(
+    io: std.Io,
+    stream: *std.Io.net.Stream,
+    status_code: u16,
+    content_type: []const u8,
+    body: []const u8,
+    extra: []const Header,
+) !void {
     var wbuf: [4096]u8 = undefined;
     var w = stream.writer(io, &wbuf);
     try w.interface.print(
-        "HTTP/1.1 {d} {s}\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n",
-        .{ status_code, reasonPhrase(status_code), body.len },
+        "HTTP/1.1 {d} {s}\r\ncontent-type: {s}\r\ncontent-length: {d}\r\nconnection: close\r\n",
+        .{ status_code, reasonPhrase(status_code), content_type, body.len },
     );
     for (extra) |h| {
         try w.interface.print("{s}: {s}\r\n", .{ h.name, h.value });

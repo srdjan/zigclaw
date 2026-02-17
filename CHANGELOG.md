@@ -24,6 +24,16 @@ All notable changes to this project will be documented in this file.
   - new diagnostics command: `zigclaw doctor` (dependency/config/plugin/writability/provider checks)
   - broader machine-readable output via `--json` on key commands (`version`, `update`, `vault`, `init`, non-interactive `agent`, `prompt diff`, `config validate`, `policy hash`)
   - actionable CLI error messages with command-specific remediation hints
+  - grouped command help with examples and related commands (`zigclaw <group> --help`)
+  - unified onboarding path (`init` + guided `setup`) with post-setup doctor checks and optional plugin build prompt
+  - live queue progress stream (`zigclaw queue watch --request-id ...`)
+  - run artifact summary (`zigclaw run summary --request-id ...`)
+  - shell completion generation (`zigclaw completion zsh|bash|fish`)
+  - lightweight terminal ops dashboard (`zigclaw ops summary|watch`)
+  - lightweight gateway ops web dashboard (`GET /ops`, `GET /v1/ops`)
+  - ops web dashboard filters (`limit`, `interval_ms`, `view=state|full`)
+  - hidden secret/passphrase prompts for vault and provider auth flows
+  - gateway schema cleanup: nested JSON fields for tools/manifests/results (no JSON-in-string wrappers)
 - New configuration section `[persistence.git]` with path allow/deny filters, branch/remote controls, and push defaults.
 - New configuration fields:
   - `vault_path`

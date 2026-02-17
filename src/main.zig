@@ -30,6 +30,30 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         return;
     }
 
+    if (argv.len >= 3 and isHelpArg(argv[2])) {
+        if (std.mem.eql(u8, cmd, "agent")) return usageAgent(io);
+        if (std.mem.eql(u8, cmd, "doctor")) return usageDoctor(io);
+        if (std.mem.eql(u8, cmd, "update")) return usageUpdate(io);
+        if (std.mem.eql(u8, cmd, "run")) return usageRun(io);
+        if (std.mem.eql(u8, cmd, "ops")) return usageOps(io);
+        if (std.mem.eql(u8, cmd, "vault")) return usageVault(io);
+        if (std.mem.eql(u8, cmd, "config")) return usageConfig(io);
+        if (std.mem.eql(u8, cmd, "prompt")) return usagePrompt(io);
+        if (std.mem.eql(u8, cmd, "tools")) return usageTools(io);
+        if (std.mem.eql(u8, cmd, "task")) return usageTask(io);
+        if (std.mem.eql(u8, cmd, "templates")) return usageTemplates(io);
+        if (std.mem.eql(u8, cmd, "queue")) return usageQueue(io);
+        if (std.mem.eql(u8, cmd, "git")) return usageGit(io);
+        if (std.mem.eql(u8, cmd, "policy")) return usagePolicy(io);
+        if (std.mem.eql(u8, cmd, "audit")) return usageAudit(io);
+        if (std.mem.eql(u8, cmd, "attest")) return usageAttest(io);
+        if (std.mem.eql(u8, cmd, "replay")) return usageReplay(io);
+        if (std.mem.eql(u8, cmd, "gateway")) return usageGateway(io);
+        if (std.mem.eql(u8, cmd, "completion")) return usageCompletion(io);
+        if (std.mem.eql(u8, cmd, "init")) return usageInit(io);
+        if (std.mem.eql(u8, cmd, "setup")) return usageSetup(io);
+    }
+
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
         const build_options = @import("build_options");
         const builtin = @import("builtin");
@@ -56,7 +80,19 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
     }
 
     if (std.mem.eql(u8, cmd, "setup")) {
-        try @import("setup/wizard.zig").run(a, io);
+        try runOnboarding(a, io, true);
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "completion")) {
+        if (argv.len < 3) return error.InvalidArgs;
+        const shell = argv[2];
+        const script = completionScript(shell) orelse return error.InvalidArgs;
+        var obuf: [8192]u8 = undefined;
+        var ow = std.Io.File.stdout().writer(io, &obuf);
+        try ow.interface.writeAll(script);
+        if (script.len == 0 or script[script.len - 1] != '\n') try ow.interface.writeAll("\n");
+        try ow.flush();
         return;
     }
 
@@ -156,11 +192,11 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             const name: []const u8 = argv[3];
 
             var val_buf: [4096]u8 = undefined;
-            const value = try prompts_mod.readLine(io, "Value: ", &val_buf);
+            const value = try prompts_mod.readSecretLine(io, "Secret value (hidden): ", &val_buf);
             if (value.len == 0) return error.InvalidArgs;
 
             var pass_buf: [256]u8 = undefined;
-            const passphrase = try prompts_mod.readLine(io, "Vault passphrase: ", &pass_buf);
+            const passphrase = try prompts_mod.readSecretLine(io, "Vault passphrase (hidden): ", &pass_buf);
             if (passphrase.len == 0) return error.InvalidArgs;
 
             var v = try vault_mod.open(a, io, vault_path, passphrase);
@@ -191,7 +227,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             const name: []const u8 = argv[3];
 
             var pass_buf: [256]u8 = undefined;
-            const passphrase = try prompts_mod.readLine(io, "Vault passphrase: ", &pass_buf);
+            const passphrase = try prompts_mod.readSecretLine(io, "Vault passphrase (hidden): ", &pass_buf);
             if (passphrase.len == 0) return error.InvalidArgs;
 
             var v = try vault_mod.open(a, io, vault_path, passphrase);
@@ -232,7 +268,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
 
         if (std.mem.eql(u8, sub, "list")) {
             var pass_buf: [256]u8 = undefined;
-            const passphrase = try prompts_mod.readLine(io, "Vault passphrase: ", &pass_buf);
+            const passphrase = try prompts_mod.readSecretLine(io, "Vault passphrase (hidden): ", &pass_buf);
             if (passphrase.len == 0) return error.InvalidArgs;
 
             var v = try vault_mod.open(a, io, vault_path, passphrase);
@@ -272,7 +308,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             const name: []const u8 = argv[3];
 
             var pass_buf: [256]u8 = undefined;
-            const passphrase = try prompts_mod.readLine(io, "Vault passphrase: ", &pass_buf);
+            const passphrase = try prompts_mod.readSecretLine(io, "Vault passphrase (hidden): ", &pass_buf);
             if (passphrase.len == 0) return error.InvalidArgs;
 
             var v = try vault_mod.open(a, io, vault_path, passphrase);
@@ -318,6 +354,61 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
 
     var app = try App.init(a, io);
     defer app.deinit();
+
+    if (std.mem.eql(u8, cmd, "run")) {
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
+        if (std.mem.eql(u8, sub, "summary")) {
+            const rid = flagValue(argv, "--request-id") orelse return error.InvalidArgs;
+            const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+            const as_json = hasFlag(argv, "--json");
+
+            var validated = try app.loadConfig(cfg_path);
+            defer validated.deinit(a);
+
+            try printRunSummary(a, io, validated, rid, as_json);
+            return;
+        }
+        try usage(io);
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "ops")) {
+        const sub: []const u8 = if (argv.len >= 3) argv[2] else "summary";
+        const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+        const format = flagValue(argv, "--format") orelse "text";
+        const limit: usize = if (flagValue(argv, "--limit")) |s| try std.fmt.parseInt(usize, s, 10) else 5;
+        const poll_ms: u32 = if (flagValue(argv, "--poll-ms")) |s| try std.fmt.parseInt(u32, s, 10) else 1500;
+        const iterations: ?usize = if (flagValue(argv, "--iterations")) |s| try std.fmt.parseInt(usize, s, 10) else null;
+
+        var validated = try app.loadConfig(cfg_path);
+        defer validated.deinit(a);
+
+        if (std.mem.eql(u8, sub, "summary")) {
+            const as_json = std.mem.eql(u8, format, "json");
+            try printOpsSnapshot(a, io, validated, limit, as_json);
+            return;
+        }
+
+        if (std.mem.eql(u8, sub, "watch")) {
+            const as_json = std.mem.eql(u8, format, "json");
+            var i: usize = 0;
+            while (true) : (i += 1) {
+                if (!as_json) {
+                    var clear_buf: [64]u8 = undefined;
+                    var clear_w = std.Io.File.stdout().writer(io, &clear_buf);
+                    try clear_w.interface.writeAll("\x1b[2J\x1b[H");
+                    try clear_w.flush();
+                }
+                try printOpsSnapshot(a, io, validated, limit, as_json);
+                if (iterations) |n| if (i + 1 >= n) break;
+                io.sleep(std.Io.Duration.fromMilliseconds(@intCast(poll_ms)), .awake) catch {};
+            }
+            return;
+        }
+
+        try usage(io);
+        return;
+    }
 
     if (std.mem.eql(u8, cmd, "audit")) {
         const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
@@ -481,10 +572,11 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
 
+        const trace = @import("obs/trace.zig");
+        const loop = @import("agent/loop.zig");
+
         if (as_json) {
             if (interactive) return error.InvalidArgs;
-            const trace = @import("obs/trace.zig");
-            const loop = @import("agent/loop.zig");
 
             const rid = trace.newRequestId(io);
             var result = try loop.runLoop(a, io, validated, msg, rid.slice(), .{
@@ -515,17 +607,57 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             try ow.interface.print("{s}\n", .{out});
             try ow.flush();
         } else {
-            try app.runAgent(validated, msg, .{
+            if (interactive) {
+                try app.runAgent(validated, msg, .{
+                    .verbose = verbose,
+                    .interactive = true,
+                    .agent_id = agent_id,
+                });
+                return;
+            }
+
+            const rid = trace.newRequestId(io);
+            var result = try loop.runLoop(a, io, validated, msg, rid.slice(), .{
                 .verbose = verbose,
-                .interactive = interactive,
+                .interactive = false,
                 .agent_id = agent_id,
             });
+            defer result.deinit(a);
+
+            const receipt_path = try std.fmt.allocPrint(a, "{s}/.zigclaw/receipts/{s}.json", .{
+                validated.raw.security.workspace_root,
+                rid.slice(),
+            });
+            defer a.free(receipt_path);
+            const capsule_path = try std.fmt.allocPrint(a, "{s}/.zigclaw/capsules/{s}.json", .{
+                validated.raw.security.workspace_root,
+                rid.slice(),
+            });
+            defer a.free(capsule_path);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("request_id={s}\nturns={d}\n{s}\n", .{ rid.slice(), result.turns, result.content });
+            if (validated.raw.attestation.enabled) {
+                try ow.interface.print("receipt_path={s}\n", .{receipt_path});
+            }
+            if (validated.raw.replay.enabled) {
+                try ow.interface.print("capsule_path={s}\n", .{capsule_path});
+            }
+            try ow.flush();
         }
         return;
     }
 
     if (std.mem.eql(u8, cmd, "init")) {
-        try scaffoldProject(a, io, hasFlag(argv, "--json"));
+        const as_json = hasFlag(argv, "--json");
+        const quick = hasFlag(argv, "--quick") or hasFlag(argv, "--scaffold");
+        const guided = hasFlag(argv, "--guided");
+        if (as_json or quick) {
+            try scaffoldProject(a, io, as_json);
+        } else {
+            try runOnboarding(a, io, guided);
+        }
         return;
     }
 
@@ -799,13 +931,14 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
         var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
+        const queue_mod = @import("queue/worker.zig");
 
         if (std.mem.eql(u8, sub, "enqueue-agent")) {
             const msg = flagValue(argv, "--message") orelse return error.InvalidArgs;
             const agent_id = flagValue(argv, "--agent");
             const request_id = flagValue(argv, "--request-id");
 
-            const rid = try @import("queue/worker.zig").enqueueAgent(a, io, validated, msg, agent_id, request_id);
+            const rid = try queue_mod.enqueueAgent(a, io, validated, msg, agent_id, request_id);
             defer a.free(rid);
 
             var obuf: [4096]u8 = undefined;
@@ -820,7 +953,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             const max_jobs = if (flagValue(argv, "--max-jobs")) |m| try std.fmt.parseInt(usize, m, 10) else null;
             const poll_ms = if (flagValue(argv, "--poll-ms")) |m| try std.fmt.parseInt(u32, m, 10) else null;
 
-            try @import("queue/worker.zig").runWorker(a, io, validated, .{
+            try queue_mod.runWorker(a, io, validated, .{
                 .once = once,
                 .max_jobs = max_jobs,
                 .poll_ms_override = poll_ms,
@@ -831,7 +964,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         if (std.mem.eql(u8, sub, "status")) {
             const rid = flagValue(argv, "--request-id") orelse return error.InvalidArgs;
             const include_payload = hasFlag(argv, "--include-payload");
-            const out = try @import("queue/worker.zig").statusJsonAlloc(a, io, validated, rid, include_payload);
+            const out = try queue_mod.statusJsonAlloc(a, io, validated, rid, include_payload);
             defer a.free(out);
 
             var obuf: [4096]u8 = undefined;
@@ -841,9 +974,63 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
+        if (std.mem.eql(u8, sub, "watch")) {
+            const rid = flagValue(argv, "--request-id") orelse return error.InvalidArgs;
+            const include_payload = hasFlag(argv, "--include-payload");
+            const as_json = hasFlag(argv, "--json");
+            const poll_ms: u32 = if (flagValue(argv, "--poll-ms")) |m| try std.fmt.parseInt(u32, m, 10) else 1000;
+            const timeout_ms: ?u64 = if (flagValue(argv, "--timeout-ms")) |t| try std.fmt.parseInt(u64, t, 10) else null;
+            const start_ms = nowUnixMs(io);
+            var last_state: ?[]u8 = null;
+            defer if (last_state) |s| a.free(s);
+
+            while (true) {
+                const out = try queue_mod.statusJsonAlloc(a, io, validated, rid, include_payload);
+                defer a.free(out);
+
+                var parsed = try std.json.parseFromSlice(std.json.Value, a, out, .{});
+                defer parsed.deinit();
+                if (parsed.value != .object) return error.InvalidJson;
+                const state_v = parsed.value.object.get("state") orelse return error.InvalidJson;
+                if (state_v != .string) return error.InvalidJson;
+                const state = state_v.string;
+
+                const changed = blk: {
+                    if (last_state == null) break :blk true;
+                    break :blk !std.mem.eql(u8, last_state.?, state);
+                };
+                if (changed) {
+                    if (last_state) |s| a.free(s);
+                    last_state = try a.dupe(u8, state);
+
+                    var obuf: [4096]u8 = undefined;
+                    var ow = std.Io.File.stdout().writer(io, &obuf);
+                    const ts_ms = nowUnixMs(io);
+                    if (as_json) {
+                        const event = try queueWatchEventJsonAlloc(a, rid, state, ts_ms, parsed.value);
+                        defer a.free(event);
+                        try ow.interface.print("{s}\n", .{event});
+                    } else {
+                        try ow.interface.print("state={s} ts_ms={d}\n{s}\n", .{ state, ts_ms, out });
+                    }
+                    try ow.flush();
+                }
+
+                if (std.mem.eql(u8, state, "completed") or std.mem.eql(u8, state, "canceled") or std.mem.eql(u8, state, "not_found")) {
+                    break;
+                }
+
+                if (timeout_ms) |limit| {
+                    if (@as(u64, @intCast(nowUnixMs(io) - start_ms)) >= limit) break;
+                }
+                io.sleep(std.Io.Duration.fromMilliseconds(@intCast(poll_ms)), .awake) catch {};
+            }
+            return;
+        }
+
         if (std.mem.eql(u8, sub, "cancel")) {
             const rid = flagValue(argv, "--request-id") orelse return error.InvalidArgs;
-            const out = try @import("queue/worker.zig").cancelRequestJsonAlloc(a, io, validated, rid);
+            const out = try queue_mod.cancelRequestJsonAlloc(a, io, validated, rid);
             defer a.free(out);
 
             var obuf: [4096]u8 = undefined;
@@ -854,7 +1041,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         }
 
         if (std.mem.eql(u8, sub, "metrics")) {
-            const out = try @import("queue/worker.zig").metricsJsonAlloc(a, io, validated);
+            const out = try queue_mod.metricsJsonAlloc(a, io, validated);
             defer a.free(out);
 
             var obuf: [4096]u8 = undefined;
@@ -1187,6 +1374,15 @@ fn hasFlag(argv: []const [:0]const u8, name: []const u8) bool {
     return false;
 }
 
+fn isHelpArg(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h");
+}
+
+fn nowUnixMs(io: std.Io) i64 {
+    const ts = std.Io.Clock.now(.real, io);
+    return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_ms));
+}
+
 fn jsonObj(a: std.mem.Allocator, value: anytype) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(a);
     defer aw.deinit();
@@ -1223,6 +1419,848 @@ fn configValidateJsonAlloc(a: std.mem.Allocator, validated: config_mod.Validated
     return try aw.toOwnedSlice();
 }
 
+fn runOnboarding(a: std.mem.Allocator, io: std.Io, guided: bool) !void {
+    if (guided) {
+        const completed = try @import("setup/wizard.zig").run(a, io);
+        if (!completed) return;
+    } else {
+        try scaffoldProject(a, io, false);
+    }
+
+    var obuf: [4096]u8 = undefined;
+    var ow = std.Io.File.stdout().writer(io, &obuf);
+    try ow.interface.writeAll("\nRunning post-setup checks...\n");
+    try ow.flush();
+
+    doctor.run(a, io, "zigclaw.toml", false) catch |e| {
+        var ebuf: [1024]u8 = undefined;
+        var ew = std.Io.File.stderr().writer(io, &ebuf);
+        try ew.interface.print("warning: doctor check failed: {s}\n", .{@errorName(e)});
+        try ew.flush();
+    };
+
+    if (!guided) {
+        try ow.interface.writeAll("Tip: build plugins with `zig build plugins`\n");
+        try ow.flush();
+        return;
+    }
+
+    const prompts = @import("setup/prompts.zig");
+    const should_build = try prompts.readYesNo(io, "Build plugins now (zig build plugins)?", true);
+    if (!should_build) return;
+
+    try ow.interface.writeAll("Building plugins...\n");
+    try ow.flush();
+    runPluginBuild(a, io) catch |e| {
+        var ebuf: [1024]u8 = undefined;
+        var ew = std.Io.File.stderr().writer(io, &ebuf);
+        try ew.interface.print("warning: plugin build failed: {s}\n", .{@errorName(e)});
+        try ew.interface.writeAll("hint: run `zig build plugins` after fixing build issues\n");
+        try ew.flush();
+    };
+}
+
+fn runPluginBuild(a: std.mem.Allocator, io: std.Io) !void {
+    const argv = [_][]const u8{ "zig", "build", "plugins" };
+    var child = try std.process.spawn(io, .{
+        .argv = &argv,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+
+    var stdout_text: []u8 = &.{};
+    errdefer if (stdout_text.len > 0) a.free(stdout_text);
+    var stderr_text: []u8 = &.{};
+    errdefer if (stderr_text.len > 0) a.free(stderr_text);
+
+    if (child.stdout) |*out| {
+        var out_buf: [4096]u8 = undefined;
+        var out_reader = out.reader(io, &out_buf);
+        stdout_text = try out_reader.interface.allocRemaining(a, std.Io.Limit.limited(8 * 1024 * 1024));
+    } else {
+        stdout_text = try a.dupe(u8, "");
+    }
+
+    if (child.stderr) |*errf| {
+        var err_buf: [4096]u8 = undefined;
+        var err_reader = errf.reader(io, &err_buf);
+        stderr_text = try err_reader.interface.allocRemaining(a, std.Io.Limit.limited(8 * 1024 * 1024));
+    } else {
+        stderr_text = try a.dupe(u8, "");
+    }
+
+    const term = try child.wait(io);
+
+    if (stdout_text.len > 0) {
+        var obuf: [4096]u8 = undefined;
+        var ow = std.Io.File.stdout().writer(io, &obuf);
+        try ow.interface.writeAll(stdout_text);
+        if (stdout_text[stdout_text.len - 1] != '\n') try ow.interface.writeAll("\n");
+        try ow.flush();
+    }
+
+    if (stderr_text.len > 0) {
+        var ebuf: [4096]u8 = undefined;
+        var ew = std.Io.File.stderr().writer(io, &ebuf);
+        try ew.interface.writeAll(stderr_text);
+        if (stderr_text[stderr_text.len - 1] != '\n') try ew.interface.writeAll("\n");
+        try ew.flush();
+    }
+
+    a.free(stdout_text);
+    a.free(stderr_text);
+
+    switch (term) {
+        .exited => |code| if (code != 0) return error.PluginBuildFailed,
+        else => return error.PluginBuildFailed,
+    }
+}
+
+fn completionScript(shell: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, shell, "zsh")) {
+        return 
+        \\#compdef zigclaw
+        \\
+        \\_zigclaw() {
+        \\  local -a cmds
+        \\  cmds=(
+        \\    'version:Show binary version'
+        \\    'doctor:Run environment diagnostics'
+        \\    'setup:Run guided onboarding'
+        \\    'update:Check or apply updates'
+        \\    'run:Run-related helpers'
+        \\    'ops:Operations dashboard helpers'
+        \\    'vault:Manage encrypted secrets'
+        \\    'init:Initialize workspace files'
+        \\    'agent:Run agent loop'
+        \\    'prompt:Prompt inspection tools'
+        \\    'tools:Tool registry commands'
+        \\    'task:Task primitive commands'
+        \\    'primitive:Primitive validation'
+        \\    'templates:Template commands'
+        \\    'git:Persistence git commands'
+        \\    'queue:Queue worker commands'
+        \\    'config:Configuration commands'
+        \\    'policy:Policy commands'
+        \\    'audit:Audit commands'
+        \\    'attest:Attestation commands'
+        \\    'replay:Replay commands'
+        \\    'gateway:Gateway server commands'
+        \\    'completion:Shell completions'
+        \\  )
+        \\  _arguments \
+        \\    '1:command:->cmds' \
+        \\    '2:subcommand:->subs' \
+        \\    '*::args:_files'
+        \\
+        \\  case $state in
+        \\    cmds)
+        \\      _describe -t commands 'zigclaw commands' cmds
+        \\      ;;
+        \\    subs)
+        \\      case ${words[2]} in
+        \\        queue) _values 'queue subcommand' enqueue-agent worker status watch cancel metrics ;;
+        \\        vault) _values 'vault subcommand' set get list delete ;;
+        \\        run) _values 'run subcommand' summary ;;
+        \\        ops) _values 'ops subcommand' summary watch ;;
+        \\        completion) _values 'shell' zsh bash fish ;;
+        \\      esac
+        \\      ;;
+        \\  esac
+        \\}
+        \\
+        \\_zigclaw "$@"
+        ;
+    }
+
+    if (std.mem.eql(u8, shell, "bash")) {
+        return 
+        \\_zigclaw_completions()
+        \\{
+        \\  local cur="${COMP_WORDS[COMP_CWORD]}"
+        \\  local prev="${COMP_WORDS[COMP_CWORD-1]}"
+        \\  local cmd="${COMP_WORDS[1]}"
+        \\
+        \\  local cmds="version doctor setup update run ops vault init agent prompt tools task primitive templates git queue config policy audit attest replay gateway completion"
+        \\  if [[ ${COMP_CWORD} -eq 1 ]]; then
+        \\    COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+        \\    return
+        \\  fi
+        \\
+        \\  case "${cmd}" in
+        \\    queue)
+        \\      COMPREPLY=( $(compgen -W "enqueue-agent worker status watch cancel metrics" -- "$cur") )
+        \\      return
+        \\      ;;
+        \\    vault)
+        \\      COMPREPLY=( $(compgen -W "set get list delete" -- "$cur") )
+        \\      return
+        \\      ;;
+        \\    run)
+        \\      COMPREPLY=( $(compgen -W "summary" -- "$cur") )
+        \\      return
+        \\      ;;
+        \\    ops)
+        \\      COMPREPLY=( $(compgen -W "summary watch" -- "$cur") )
+        \\      return
+        \\      ;;
+        \\    completion)
+        \\      COMPREPLY=( $(compgen -W "zsh bash fish" -- "$cur") )
+        \\      return
+        \\      ;;
+        \\  esac
+        \\
+        \\  COMPREPLY=( $(compgen -W "--help -h --json --config --request-id --message --format --poll-ms --timeout-ms --include-payload --agent --verbose --interactive" -- "$cur") )
+        \\}
+        \\
+        \\complete -F _zigclaw_completions zigclaw
+        ;
+    }
+
+    if (std.mem.eql(u8, shell, "fish")) {
+        return 
+        \\complete -c zigclaw -f
+        \\complete -c zigclaw -n '__fish_use_subcommand' -a 'version doctor setup update run ops vault init agent prompt tools task primitive templates git queue config policy audit attest replay gateway completion'
+        \\complete -c zigclaw -n '__fish_seen_subcommand_from queue' -a 'enqueue-agent worker status watch cancel metrics'
+        \\complete -c zigclaw -n '__fish_seen_subcommand_from vault' -a 'set get list delete'
+        \\complete -c zigclaw -n '__fish_seen_subcommand_from run' -a 'summary'
+        \\complete -c zigclaw -n '__fish_seen_subcommand_from ops' -a 'summary watch'
+        \\complete -c zigclaw -n '__fish_seen_subcommand_from completion' -a 'zsh bash fish'
+        ;
+    }
+
+    return null;
+}
+
+fn queueWatchEventJsonAlloc(
+    a: std.mem.Allocator,
+    request_id: []const u8,
+    state: []const u8,
+    ts_ms: i64,
+    status: std.json.Value,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+    try stream.beginObject();
+    try stream.objectField("request_id");
+    try stream.write(request_id);
+    try stream.objectField("state");
+    try stream.write(state);
+    try stream.objectField("ts_ms");
+    try stream.write(ts_ms);
+    try stream.objectField("status");
+    try stream.write(status);
+    try stream.endObject();
+    return try aw.toOwnedSlice();
+}
+
+fn printRunSummary(a: std.mem.Allocator, io: std.Io, validated: config_mod.ValidatedConfig, request_id: []const u8, as_json: bool) !void {
+    const queue_mod = @import("queue/worker.zig");
+    const status = try queue_mod.statusJsonAlloc(a, io, validated, request_id, false);
+    defer a.free(status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, status, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidJson;
+    const state_v = parsed.value.object.get("state") orelse return error.InvalidJson;
+    if (state_v != .string) return error.InvalidJson;
+    const state = state_v.string;
+
+    const receipt_path = try std.fmt.allocPrint(a, "{s}/.zigclaw/receipts/{s}.json", .{
+        validated.raw.security.workspace_root,
+        request_id,
+    });
+    defer a.free(receipt_path);
+    const capsule_path = try std.fmt.allocPrint(a, "{s}/.zigclaw/capsules/{s}.json", .{
+        validated.raw.security.workspace_root,
+        request_id,
+    });
+    defer a.free(capsule_path);
+
+    const receipt_exists = if (std.Io.Dir.cwd().statFile(io, receipt_path, .{})) |_| true else |_| false;
+    const capsule_exists = if (std.Io.Dir.cwd().statFile(io, capsule_path, .{})) |_| true else |_| false;
+
+    var obuf: [4096]u8 = undefined;
+    var ow = std.Io.File.stdout().writer(io, &obuf);
+    if (as_json) {
+        const out = try jsonObj(a, .{
+            .request_id = request_id,
+            .state = state,
+            .receipt_path = receipt_path,
+            .receipt_exists = receipt_exists,
+            .capsule_path = capsule_path,
+            .capsule_exists = capsule_exists,
+        });
+        defer a.free(out);
+        try ow.interface.print("{s}\n", .{out});
+    } else {
+        try ow.interface.print("request_id={s}\nstate={s}\n", .{ request_id, state });
+        try ow.interface.print("receipt_path={s} ({s})\n", .{ receipt_path, if (receipt_exists) "found" else "missing" });
+        try ow.interface.print("capsule_path={s} ({s})\n", .{ capsule_path, if (capsule_exists) "found" else "missing" });
+        try ow.interface.print("watch=zigclaw queue watch --request-id {s}\n", .{request_id});
+    }
+    try ow.flush();
+}
+
+fn printOpsSnapshot(a: std.mem.Allocator, io: std.Io, validated: config_mod.ValidatedConfig, limit: usize, as_json: bool) !void {
+    const snapshot = try opsSnapshotJsonAlloc(a, io, validated, limit);
+    defer a.free(snapshot);
+
+    var obuf: [8192]u8 = undefined;
+    var ow = std.Io.File.stdout().writer(io, &obuf);
+    if (as_json) {
+        try ow.interface.print("{s}\n", .{snapshot});
+        try ow.flush();
+        return;
+    }
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, snapshot, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidJson;
+    const root = parsed.value.object;
+
+    const now_ms = getJsonInt(root, "generated_at_ms") orelse 0;
+    const queue_v = root.get("queue") orelse return error.InvalidJson;
+    if (queue_v != .object) return error.InvalidJson;
+    const queue = queue_v.object;
+
+    const audit_v = root.get("audit_summary") orelse return error.InvalidJson;
+    if (audit_v != .object) return error.InvalidJson;
+    const audit = audit_v.object;
+
+    try ow.interface.print("zigclaw ops dashboard @ {d}\n", .{now_ms});
+    try ow.interface.writeAll("========================================\n");
+    try ow.interface.print(
+        "queue: incoming {d} (ready {d}, delayed {d}) | processing {d} | outgoing {d} | canceled {d} | cancel_markers {d}\n",
+        .{
+            getJsonInt(queue, "incoming_total") orelse 0,
+            getJsonInt(queue, "incoming_ready") orelse 0,
+            getJsonInt(queue, "incoming_delayed") orelse 0,
+            getJsonInt(queue, "processing") orelse 0,
+            getJsonInt(queue, "outgoing") orelse 0,
+            getJsonInt(queue, "canceled") orelse 0,
+            getJsonInt(queue, "cancel_markers") orelse 0,
+        },
+    );
+
+    try ow.interface.print(
+        "audit: total {d} | allowed {d} | denied {d} | unique decisions {d}\n",
+        .{
+            getJsonInt(audit, "total_events") orelse 0,
+            getJsonInt(audit, "allowed_count") orelse 0,
+            getJsonInt(audit, "denied_count") orelse 0,
+            getJsonInt(audit, "unique_tools") orelse 0,
+        },
+    );
+
+    try ow.interface.writeAll("recent receipts:\n");
+    if (root.get("recent_receipts")) |receipts| {
+        if (receipts == .array and receipts.array.items.len > 0) {
+            for (receipts.array.items) |entry| {
+                if (entry != .string) continue;
+                try ow.interface.print("  - {s}\n", .{entry.string});
+            }
+        } else {
+            try ow.interface.writeAll("  (none)\n");
+        }
+    } else {
+        try ow.interface.writeAll("  (none)\n");
+    }
+
+    try ow.interface.writeAll("recent capsules:\n");
+    if (root.get("recent_capsules")) |capsules| {
+        if (capsules == .array and capsules.array.items.len > 0) {
+            for (capsules.array.items) |entry| {
+                if (entry != .string) continue;
+                try ow.interface.print("  - {s}\n", .{entry.string});
+            }
+        } else {
+            try ow.interface.writeAll("  (none)\n");
+        }
+    } else {
+        try ow.interface.writeAll("  (none)\n");
+    }
+    try ow.flush();
+}
+
+fn opsSnapshotJsonAlloc(a: std.mem.Allocator, io: std.Io, validated: config_mod.ValidatedConfig, limit: usize) ![]u8 {
+    const queue_mod = @import("queue/worker.zig");
+    const report_mod = @import("audit/report.zig");
+    const log_reader = @import("audit/log_reader.zig");
+
+    const queue_json = try queue_mod.metricsJsonAlloc(a, io, validated);
+    defer a.free(queue_json);
+    var queue_parsed = try std.json.parseFromSlice(std.json.Value, a, queue_json, .{});
+    defer queue_parsed.deinit();
+
+    const events = try log_reader.readEvents(a, io, validated.raw.logging.dir, validated.raw.logging.file, .{});
+    defer log_reader.freeEvents(a, events);
+    var summary = try report_mod.buildSummary(a, events);
+    defer summary.deinit(a);
+    const audit_json = try report_mod.formatSummaryJson(a, summary);
+    defer a.free(audit_json);
+    var audit_parsed = try std.json.parseFromSlice(std.json.Value, a, audit_json, .{});
+    defer audit_parsed.deinit();
+
+    const receipts_dir = try std.fs.path.join(a, &.{ validated.raw.security.workspace_root, ".zigclaw/receipts" });
+    defer a.free(receipts_dir);
+    const capsules_dir = try std.fs.path.join(a, &.{ validated.raw.security.workspace_root, ".zigclaw/capsules" });
+    defer a.free(capsules_dir);
+
+    const receipts = try listRecentJsonNamesAlloc(a, io, receipts_dir, limit);
+    defer freeStringList(a, receipts);
+    const capsules = try listRecentJsonNamesAlloc(a, io, capsules_dir, limit);
+    defer freeStringList(a, capsules);
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+    try stream.beginObject();
+    try stream.objectField("generated_at_ms");
+    try stream.write(nowUnixMs(io));
+    try stream.objectField("queue");
+    try stream.write(queue_parsed.value);
+    try stream.objectField("audit_summary");
+    try stream.write(audit_parsed.value);
+    try stream.objectField("recent_receipts");
+    try stream.write(receipts);
+    try stream.objectField("recent_capsules");
+    try stream.write(capsules);
+    try stream.endObject();
+    return try aw.toOwnedSlice();
+}
+
+fn listRecentJsonNamesAlloc(a: std.mem.Allocator, io: std.Io, dir_path: []const u8, limit: usize) ![]const []const u8 {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch {
+        return try a.alloc([]const u8, 0);
+    };
+    defer dir.close(io);
+
+    var names = std.array_list.Managed([]const u8).init(a);
+    defer names.deinit();
+
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (ent.kind != .file) continue;
+        if (!std.mem.endsWith(u8, ent.name, ".json")) continue;
+        try names.append(try a.dupe(u8, ent.name));
+    }
+
+    std.sort.block([]const u8, names.items, {}, struct {
+        fn gt(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return std.mem.order(u8, lhs, rhs) == .gt;
+        }
+    }.gt);
+
+    const take = @min(limit, names.items.len);
+    const out = try a.alloc([]const u8, take);
+    for (0..take) |i| out[i] = names.items[i];
+    for (take..names.items.len) |i| a.free(names.items[i]);
+    return out;
+}
+
+fn freeStringList(a: std.mem.Allocator, items: []const []const u8) void {
+    for (items) |it| a.free(it);
+    a.free(items);
+}
+
+fn getJsonInt(obj: std.json.ObjectMap, key: []const u8) ?i64 {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .integer => |i| i,
+        else => null,
+    };
+}
+
+fn usageAgent(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\agent
+        \\Usage:
+        \\  zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml] [--json]
+        \\
+        \\Examples:
+        \\  zigclaw agent --message "Summarize repo status" --config zigclaw.toml
+        \\  zigclaw agent --message "hello" --agent planner --json
+        \\  zigclaw agent --interactive --config zigclaw.toml
+        \\
+        \\Related:
+        \\  zigclaw prompt --help
+        \\  zigclaw policy --help
+    );
+}
+
+fn usageDoctor(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\doctor
+        \\Usage:
+        \\  zigclaw doctor [--config zigclaw.toml] [--json]
+        \\
+        \\Examples:
+        \\  zigclaw doctor
+        \\  zigclaw doctor --config zigclaw.toml --json
+        \\
+        \\Related:
+        \\  zigclaw config --help
+        \\  zigclaw init --help
+    );
+}
+
+fn usageUpdate(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\update
+        \\Usage:
+        \\  zigclaw update [--check] [--url <manifest-url>] [--json]
+        \\
+        \\Examples:
+        \\  zigclaw update --check
+        \\  zigclaw update --url https://example.com/latest.json
+        \\  zigclaw update --check --json
+        \\
+        \\Related:
+        \\  zigclaw version --json
+        \\  zigclaw doctor --help
+    );
+}
+
+fn usageRun(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\run
+        \\Usage:
+        \\  zigclaw run summary --request-id <id> [--config zigclaw.toml] [--json]
+        \\
+        \\Examples:
+        \\  zigclaw run summary --request-id req_1
+        \\  zigclaw run summary --request-id req_1 --json
+        \\  zigclaw run summary --request-id req_1 --config zigclaw.toml
+        \\
+        \\Related:
+        \\  zigclaw queue watch --request-id <id>
+        \\  zigclaw attest <request_id>
+    );
+}
+
+fn usageOps(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\ops
+        \\Usage:
+        \\  zigclaw ops summary [--format text|json] [--limit N] [--config zigclaw.toml]
+        \\  zigclaw ops watch [--format text|json] [--limit N] [--poll-ms N] [--iterations N] [--config zigclaw.toml]
+        \\
+        \\Examples:
+        \\  zigclaw ops summary
+        \\  zigclaw ops summary --format json --limit 10
+        \\  zigclaw ops watch --poll-ms 1000 --iterations 20
+        \\
+        \\Related:
+        \\  zigclaw queue metrics
+        \\  zigclaw audit summary --format json
+    );
+}
+
+fn usageVault(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\vault
+        \\Usage:
+        \\  zigclaw vault set <name> [--vault <path>] [--json]
+        \\  zigclaw vault get <name> [--vault <path>] [--json]
+        \\  zigclaw vault list [--vault <path>] [--json]
+        \\  zigclaw vault delete <name> [--vault <path>] [--json]
+        \\
+        \\Examples:
+        \\  zigclaw vault set openai_api_key --vault ./.zigclaw/vault.enc
+        \\  zigclaw vault get openai_api_key --json
+        \\  zigclaw vault list
+        \\
+        \\Related:
+        \\  zigclaw setup --help
+        \\  zigclaw doctor --help
+    );
+}
+
+fn usageConfig(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\config
+        \\Usage:
+        \\  zigclaw config validate [--config zigclaw.toml] [--format toml|text|json] [--json]
+        \\
+        \\Examples:
+        \\  zigclaw config validate --format toml
+        \\  zigclaw config validate --format json
+        \\  zigclaw config validate --json
+        \\
+        \\Related:
+        \\  zigclaw policy --help
+        \\  zigclaw doctor --help
+    );
+}
+
+fn usagePrompt(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\prompt
+        \\Usage:
+        \\  zigclaw prompt dump --message "..." [--format json|text] [--out path] [--config zigclaw.toml]
+        \\  zigclaw prompt diff --a file --b file [--json]
+        \\
+        \\Examples:
+        \\  zigclaw prompt dump --message "hello" --format json
+        \\  zigclaw prompt dump --message "hello" --format text --out /tmp/prompt.txt
+        \\  zigclaw prompt diff --a /tmp/a.txt --b /tmp/b.txt --json
+        \\
+        \\Related:
+        \\  zigclaw agent --help
+        \\  zigclaw policy --help
+    );
+}
+
+fn usageTools(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\tools
+        \\Usage:
+        \\  zigclaw tools list [--config zigclaw.toml]
+        \\  zigclaw tools describe <tool> [--config zigclaw.toml]
+        \\  zigclaw tools run <tool> --args '{}' [--config zigclaw.toml]
+        \\
+        \\Examples:
+        \\  zigclaw tools list
+        \\  zigclaw tools describe echo
+        \\  zigclaw tools run echo --args '{"text":"hi"}'
+        \\
+        \\Related:
+        \\  zigclaw policy --help
+        \\  zigclaw doctor --help
+    );
+}
+
+fn usageTask(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\task
+        \\Usage:
+        \\  zigclaw task add "..." [--priority p] [--owner o] [--project p] [--tags "a,b"] [--status s] [--config zigclaw.toml]
+        \\  zigclaw task list [--status s] [--owner o] [--project p] [--format text|json] [--config zigclaw.toml]
+        \\  zigclaw task done <slug> [--reason "..."] [--config zigclaw.toml]
+        \\
+        \\Examples:
+        \\  zigclaw task add "Reply to client" --priority high
+        \\  zigclaw task list --status open --format json
+        \\  zigclaw task done reply-to-client --reason "sent update"
+        \\
+        \\Related:
+        \\  zigclaw templates --help
+        \\  zigclaw git --help
+    );
+}
+
+fn usageTemplates(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\templates
+        \\Usage:
+        \\  zigclaw templates list [--config zigclaw.toml]
+        \\  zigclaw templates show [task] [--config zigclaw.toml]
+        \\  zigclaw templates validate [task] [--config zigclaw.toml]
+        \\
+        \\Examples:
+        \\  zigclaw templates list
+        \\  zigclaw templates show task
+        \\  zigclaw templates validate task
+        \\
+        \\Related:
+        \\  zigclaw task --help
+        \\  zigclaw primitive validate <slug|path>
+    );
+}
+
+fn usageQueue(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\queue
+        \\Usage:
+        \\  zigclaw queue enqueue-agent --message "..." [--agent id] [--request-id id] [--config zigclaw.toml]
+        \\  zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.toml]
+        \\  zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]
+        \\  zigclaw queue watch --request-id <id> [--include-payload] [--poll-ms N] [--timeout-ms N] [--json] [--config zigclaw.toml]
+        \\  zigclaw queue cancel --request-id <id> [--config zigclaw.toml]
+        \\  zigclaw queue metrics [--config zigclaw.toml]
+        \\
+        \\Examples:
+        \\  zigclaw queue enqueue-agent --message "nightly check" --request-id req_1
+        \\  zigclaw queue watch --request-id req_1 --poll-ms 500
+        \\  zigclaw queue metrics
+        \\
+        \\Related:
+        \\  zigclaw gateway --help
+        \\  zigclaw agent --help
+    );
+}
+
+fn usageGit(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\git
+        \\Usage:
+        \\  zigclaw git init [--remote <url>] [--branch <name>] [--json] [--config zigclaw.toml]
+        \\  zigclaw git status [--json] [--config zigclaw.toml]
+        \\  zigclaw git sync [--message "..."] [--push] [--json] [--config zigclaw.toml]
+        \\
+        \\Examples:
+        \\  zigclaw git init --branch main
+        \\  zigclaw git status --json
+        \\  zigclaw git sync --message "sync memory updates" --push
+        \\
+        \\Related:
+        \\  zigclaw task --help
+        \\  zigclaw doctor --help
+    );
+}
+
+fn usagePolicy(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\policy
+        \\Usage:
+        \\  zigclaw policy hash [--config zigclaw.toml] [--json]
+        \\  zigclaw policy explain (--tool <name> | --mount <path> | --command "cmd") [--config zigclaw.toml]
+        \\
+        \\Examples:
+        \\  zigclaw policy hash --json
+        \\  zigclaw policy explain --tool fs_read
+        \\  zigclaw policy explain --command "wasmtime run --mapdir /workspace::/workspace plugin.wasm"
+        \\
+        \\Related:
+        \\  zigclaw tools --help
+        \\  zigclaw config --help
+    );
+}
+
+fn usageAudit(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\audit
+        \\Usage:
+        \\  zigclaw audit report [--request-id <id>] [--from <ts>] [--to <ts>] [--format text|json] [--config zigclaw.toml]
+        \\  zigclaw audit verify --request-id <id> [--format text|json] [--config zigclaw.toml]
+        \\  zigclaw audit summary [--from <ts>] [--to <ts>] [--format text|json] [--config zigclaw.toml]
+        \\
+        \\Examples:
+        \\  zigclaw audit report --request-id req_1 --format text
+        \\  zigclaw audit verify --request-id req_1 --format json
+        \\  zigclaw audit summary --from 1700000000000 --format json
+        \\
+        \\Related:
+        \\  zigclaw attest --help
+        \\  zigclaw replay --help
+    );
+}
+
+fn usageAttest(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\attest
+        \\Usage:
+        \\  zigclaw attest <request_id> [--config zigclaw.toml]
+        \\  zigclaw attest verify --request-id <id> --event-index <n> [--config zigclaw.toml]
+        \\
+        \\Examples:
+        \\  zigclaw attest req_1
+        \\  zigclaw attest verify --request-id req_1 --event-index 0
+        \\
+        \\Related:
+        \\  zigclaw audit --help
+        \\  zigclaw replay --help
+    );
+}
+
+fn usageReplay(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\replay
+        \\Usage:
+        \\  zigclaw replay capture --request-id <id> [--config zigclaw.toml]
+        \\  zigclaw replay run --capsule <path> [--config zigclaw.toml]
+        \\  zigclaw replay diff --a <path1> --b <path2>
+        \\
+        \\Examples:
+        \\  zigclaw replay capture --request-id req_1
+        \\  zigclaw replay run --capsule ./.zigclaw/capsules/req_1.json
+        \\  zigclaw replay diff --a cap_a.json --b cap_b.json
+        \\
+        \\Related:
+        \\  zigclaw attest --help
+        \\  zigclaw audit --help
+    );
+}
+
+fn usageGateway(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\gateway
+        \\Usage:
+        \\  zigclaw gateway start [--bind 127.0.0.1] [--port 8787] [--config zigclaw.toml]
+        \\
+        \\Examples:
+        \\  zigclaw gateway start
+        \\  zigclaw gateway start --bind 0.0.0.0 --port 8787
+        \\  zigclaw gateway start --config zigclaw.toml
+        \\
+        \\Related:
+        \\  zigclaw queue --help
+        \\  zigclaw doctor --help
+    );
+}
+
+fn usageCompletion(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\completion
+        \\Usage:
+        \\  zigclaw completion zsh|bash|fish
+        \\
+        \\Examples:
+        \\  zigclaw completion zsh > ~/.zfunc/_zigclaw
+        \\  zigclaw completion bash > /etc/bash_completion.d/zigclaw
+        \\  zigclaw completion fish > ~/.config/fish/completions/zigclaw.fish
+        \\
+        \\Related:
+        \\  zigclaw --help
+        \\  zigclaw doctor --help
+    );
+}
+
+fn usageInit(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\init
+        \\Usage:
+        \\  zigclaw init [--json]
+        \\  zigclaw init --quick [--json]
+        \\  zigclaw init --guided
+        \\
+        \\Examples:
+        \\  zigclaw init
+        \\  zigclaw init --guided
+        \\  zigclaw init --quick --json
+        \\
+        \\Related:
+        \\  zigclaw setup --help
+        \\  zigclaw doctor --help
+    );
+}
+
+fn usageSetup(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\setup
+        \\Usage:
+        \\  zigclaw setup
+        \\
+        \\Examples:
+        \\  zigclaw setup
+        \\  zigclaw init --guided
+        \\
+        \\Related:
+        \\  zigclaw init --help
+        \\  zigclaw doctor --help
+    );
+}
+
+fn writeGroupHelp(io: std.Io, text: []const u8) !void {
+    var buf: [8192]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+    try w.interface.writeAll(text);
+    try w.interface.writeAll("\n");
+    try w.flush();
+}
+
 fn printCliError(io: std.Io, argv: []const [:0]const u8, err: anyerror) !void {
     const cmd: []const u8 = if (argv.len >= 2) argv[1] else "";
     const as_json = hasFlag(argv, "--json");
@@ -1251,6 +2289,8 @@ fn printCliError(io: std.Io, argv: []const [:0]const u8, err: anyerror) !void {
 fn errorHint(cmd: []const u8, err: anyerror) ?[]const u8 {
     if (err == error.InvalidArgs) {
         if (std.mem.eql(u8, cmd, "agent")) return "agent arguments are invalid; `--json` cannot be combined with `--interactive`.";
+        if (std.mem.eql(u8, cmd, "run")) return "run arguments are invalid; use `zigclaw run summary --request-id <id>`.";
+        if (std.mem.eql(u8, cmd, "ops")) return "ops arguments are invalid; use `zigclaw ops summary|watch --help`.";
         if (std.mem.eql(u8, cmd, "vault")) return "vault arguments are invalid; run `zigclaw --help` for subcommand usage.";
         if (std.mem.eql(u8, cmd, "queue")) return "queue arguments are invalid; provide required --request-id or --message flags.";
         if (std.mem.eql(u8, cmd, "replay")) return "replay arguments are invalid; use --request-id/--capsule/--a/--b as required.";
@@ -1272,6 +2312,7 @@ fn errorHint(cmd: []const u8, err: anyerror) ?[]const u8 {
     if (err == error.UnknownCapabilityPreset) return "agent references an unknown capability preset.";
     if (err == error.VaultPassphraseRequired) return "vault passphrase is required.";
     if (err == error.VaultKeyNotFound) return "vault key not found; set it with `zigclaw vault set <name>`.";
+    if (err == error.ProviderApiKeyMissing) return "provider API key is missing; set providers.primary.api_key, providers.primary.api_key_vault, or export the configured api_key_env.";
     if (err == error.InvalidVaultFile or err == error.InvalidVaultData or err == error.DecryptionFailed) {
         return "vault decryption failed; verify passphrase and vault file path.";
     }
@@ -1489,6 +2530,9 @@ fn usage(io: std.Io) !void {
         \\  zigclaw doctor [--config zigclaw.toml] [--json]
         \\  zigclaw setup
         \\  zigclaw update [--check] [--url <manifest-url>] [--json]
+        \\  zigclaw run summary --request-id <id> [--config zigclaw.toml] [--json]
+        \\  zigclaw ops summary [--format text|json] [--limit N] [--config zigclaw.toml]
+        \\  zigclaw ops watch [--format text|json] [--limit N] [--poll-ms N] [--iterations N] [--config zigclaw.toml]
         \\  zigclaw vault set <name> [--vault <path>] [--json]
         \\  zigclaw vault get <name> [--vault <path>] [--json]
         \\  zigclaw vault list [--vault <path>] [--json]
@@ -1513,6 +2557,7 @@ fn usage(io: std.Io) !void {
         \\  zigclaw queue enqueue-agent --message "..." [--agent id] [--request-id id] [--config zigclaw.toml]
         \\  zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.toml]
         \\  zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]
+        \\  zigclaw queue watch --request-id <id> [--include-payload] [--poll-ms N] [--timeout-ms N] [--json] [--config zigclaw.toml]
         \\  zigclaw queue cancel --request-id <id> [--config zigclaw.toml]
         \\  zigclaw queue metrics [--config zigclaw.toml]
         \\  zigclaw config validate [--config zigclaw.toml] [--format toml|text|json] [--json]
@@ -1527,6 +2572,7 @@ fn usage(io: std.Io) !void {
         \\  zigclaw replay run --capsule <path> [--config zigclaw.toml]
         \\  zigclaw replay diff --a <path1> --b <path2>
         \\  zigclaw gateway start [--bind 127.0.0.1] [--port 8787] [--config zigclaw.toml]
+        \\  zigclaw completion zsh|bash|fish
         \\
     );
     try w.flush();

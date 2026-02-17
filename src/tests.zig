@@ -531,7 +531,7 @@ test "policy algebra enforces subset and computes intersections" {
     const child = policy_algebra.CapabilityView{
         .tools = &.{ "echo", "fs_read" },
         .allow_network = false,
-        .write_paths = &.{ "./tmp/work" },
+        .write_paths = &.{"./tmp/work"},
     };
 
     try std.testing.expect(policy_algebra.isSubsetOf(child, parent));
@@ -713,9 +713,10 @@ test "queue enqueue-agent then worker once produces outgoing result" {
         const state_v2 = obj2.get("state") orelse return error.BadGolden;
         try std.testing.expect(state_v2 == .string);
         try std.testing.expectEqualStrings("completed", state_v2.string);
-        const result_v = obj2.get("result_json") orelse return error.BadGolden;
-        try std.testing.expect(result_v == .string);
-        try std.testing.expect(std.mem.indexOf(u8, result_v.string, "\"ok\":true") != null);
+        const result_v = obj2.get("result") orelse return error.BadGolden;
+        try std.testing.expect(result_v == .object);
+        const ok_res = result_v.object.get("ok") orelse return error.BadGolden;
+        try std.testing.expect(ok_res == .bool and ok_res.bool);
     }
 }
 
@@ -1404,10 +1405,81 @@ test "gateway async queue routes enqueue, conflict, and status" {
         const state = obj.get("state") orelse return error.BadGolden;
         try std.testing.expect(state == .string);
         try std.testing.expectEqualStrings("completed", state.string);
-        const result = obj.get("result_json") orelse return error.BadGolden;
-        try std.testing.expect(result == .string);
-        try std.testing.expect(std.mem.indexOf(u8, result.string, "\"ok\":true") != null);
+        const result = obj.get("result") orelse return error.BadGolden;
+        try std.testing.expect(result == .object);
+        const ok_res = result.object.get("ok") orelse return error.BadGolden;
+        try std.testing.expect(ok_res == .bool and ok_res.bool);
     }
+}
+
+test "gateway ops routes support query-token auth for browser UI" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    var vcq = vc;
+    vcq.raw.provider_primary.kind = .stub;
+    vcq.raw.provider_reliable.retries = 0;
+    vcq.raw.provider_fixtures.mode = .off;
+    vcq.raw.observability.enabled = false;
+
+    var app = try app_mod.App.init(a, io);
+    defer app.deinit();
+
+    const token = "tok_ops";
+
+    var req_ui = try makeGatewayRequest(a, "GET", "/ops?token=tok_ops&limit=3", null, "");
+    defer req_ui.deinit(a);
+    var resp_ui = try gw_routes.handle(a, io, &app, vcq, req_ui, token, "rid_ops_ui");
+    defer resp_ui.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_ui.status);
+    try std.testing.expectEqualStrings("text/html; charset=utf-8", resp_ui.content_type);
+    try std.testing.expect(std.mem.indexOf(u8, resp_ui.body, "zigclaw ops") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp_ui.body, "id=\"limit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp_ui.body, "id=\"interval\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp_ui.body, "id=\"stateOnly\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp_ui.body, "/v1/ops?") != null);
+
+    var req_json = try makeGatewayRequest(a, "GET", "/v1/ops?token=tok_ops&limit=2", null, "");
+    defer req_json.deinit(a);
+    var resp_json = try gw_routes.handle(a, io, &app, vcq, req_json, token, "rid_ops_json");
+    defer resp_json.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_json.status);
+    try std.testing.expectEqualStrings("application/json", resp_json.content_type);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, resp_json.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const obj = parsed.value.object;
+    const rid = obj.get("request_id") orelse return error.BadGolden;
+    try std.testing.expect(rid == .string);
+    try std.testing.expectEqualStrings("rid_ops_json", rid.string);
+    const queue = obj.get("queue") orelse return error.BadGolden;
+    try std.testing.expect(queue == .object);
+    const audit = obj.get("audit_summary") orelse return error.BadGolden;
+    try std.testing.expect(audit == .object);
+
+    var req_state = try makeGatewayRequest(a, "GET", "/v1/ops?token=tok_ops&view=state", null, "");
+    defer req_state.deinit(a);
+    var resp_state = try gw_routes.handle(a, io, &app, vcq, req_state, token, "rid_ops_state");
+    defer resp_state.deinit(a);
+    try std.testing.expectEqual(@as(u16, 200), resp_state.status);
+    var parsed_state = try std.json.parseFromSlice(std.json.Value, a, resp_state.body, .{});
+    defer parsed_state.deinit();
+    try std.testing.expect(parsed_state.value == .object);
+    const state_obj = parsed_state.value.object;
+    const view = state_obj.get("view") orelse return error.BadGolden;
+    try std.testing.expect(view == .string);
+    try std.testing.expectEqualStrings("state", view.string);
+    const state = state_obj.get("state") orelse return error.BadGolden;
+    try std.testing.expect(state == .string);
+    try std.testing.expect(state_obj.get("audit_summary") == null);
 }
 
 test "gateway queue cancel route transitions request to canceled" {

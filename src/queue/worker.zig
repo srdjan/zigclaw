@@ -154,8 +154,17 @@ pub fn statusJsonAlloc(
         try stream.write(name);
     }
     if (payload) |p| {
-        try stream.objectField("result_json");
-        try stream.write(std.mem.trimEnd(u8, p, "\r\n"));
+        const trimmed = std.mem.trimEnd(u8, p, "\r\n");
+        var parsed_payload = std.json.parseFromSlice(std.json.Value, a, trimmed, .{}) catch {
+            try stream.objectField("result_raw");
+            try stream.write(trimmed);
+            try stream.endObject();
+            return try aw.toOwnedSlice();
+        };
+        defer parsed_payload.deinit();
+
+        try stream.objectField("result");
+        try stream.write(parsed_payload.value);
     }
     try stream.endObject();
     return try aw.toOwnedSlice();

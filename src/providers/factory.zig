@@ -7,7 +7,6 @@ const capsule_replay = @import("capsule_replay.zig");
 const recording = @import("recording.zig");
 const reliable = @import("reliable.zig");
 const vault_mod = @import("../vault/vault.zig");
-const vault_crypto = @import("../vault/crypto.zig");
 
 pub fn build(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig) !provider.Provider {
     // Base provider
@@ -54,6 +53,10 @@ fn buildBase(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig) !pro
             if (api_key.len == 0 and p.api_key_vault.len > 0) {
                 api_key = try resolveVaultKey(a, io, cfg.raw.vault_path, p.api_key_vault);
             }
+
+            if (api_key.len == 0 and requiresApiKey(p.base_url) and !envVarSet(a, p.api_key_env)) {
+                return error.ProviderApiKeyMissing;
+            }
             break :blk .{ .openai_compat = try openai.OpenAiCompatProvider.init(a, p.base_url, api_key, p.api_key_env) };
         },
     };
@@ -64,7 +67,7 @@ fn resolveVaultKey(a: std.mem.Allocator, io: std.Io, vault_path: []const u8, key
 
     // Read passphrase from stdin
     var pass_buf: [256]u8 = undefined;
-    const passphrase = try prompts.readLine(io, "Vault passphrase: ", &pass_buf);
+    const passphrase = try prompts.readSecretLine(io, "Vault passphrase (hidden): ", &pass_buf);
     if (passphrase.len == 0) return error.VaultPassphraseRequired;
 
     var v = try vault_mod.open(a, io, vault_path, passphrase);
@@ -72,4 +75,17 @@ fn resolveVaultKey(a: std.mem.Allocator, io: std.Io, vault_path: []const u8, key
 
     const value = v.get(key_name) orelse return error.VaultKeyNotFound;
     return try a.dupe(u8, value);
+}
+
+fn envVarSet(a: std.mem.Allocator, name: []const u8) bool {
+    if (name.len == 0) return false;
+    const env_z = a.dupeZ(u8, name) catch return false;
+    defer a.free(env_z);
+    const v = std.c.getenv(env_z) orelse return false;
+    return std.mem.span(v).len > 0;
+}
+
+fn requiresApiKey(base_url: []const u8) bool {
+    // Heuristic: enforce key presence for official OpenAI endpoints.
+    return std.mem.indexOf(u8, base_url, "api.openai.com") != null;
 }

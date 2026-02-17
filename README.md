@@ -55,15 +55,20 @@ zig-out/bin/zigclaw agent --interactive --config zigclaw.toml
 Command list is taken from `src/main.zig:usage()`.
 
 ```text
-zigclaw version
+zigclaw version [--json]
 zigclaw doctor [--config zigclaw.toml] [--json]
 zigclaw setup
 zigclaw update [--check] [--url <manifest-url>] [--json]
+zigclaw run summary --request-id <id> [--config zigclaw.toml] [--json]
+zigclaw ops summary [--format text|json] [--limit N] [--config zigclaw.toml]
+zigclaw ops watch [--format text|json] [--limit N] [--poll-ms N] [--iterations N] [--config zigclaw.toml]
 zigclaw vault set <name> [--vault <path>] [--json]
 zigclaw vault get <name> [--vault <path>] [--json]
 zigclaw vault list [--vault <path>] [--json]
 zigclaw vault delete <name> [--vault <path>] [--json]
 zigclaw init [--json]
+zigclaw init --quick [--json]
+zigclaw init --guided
 zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml] [--json]
 zigclaw prompt dump --message "..." [--format json|text] [--out path] [--config zigclaw.toml]
 zigclaw prompt diff --a file --b file [--json]
@@ -83,6 +88,7 @@ zigclaw git sync [--message "..."] [--push] [--json] [--config zigclaw.toml]
 zigclaw queue enqueue-agent --message "..." [--agent id] [--request-id id] [--config zigclaw.toml]
 zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.toml]
 zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]
+zigclaw queue watch --request-id <id> [--include-payload] [--poll-ms N] [--timeout-ms N] [--json] [--config zigclaw.toml]
 zigclaw queue cancel --request-id <id> [--config zigclaw.toml]
 zigclaw queue metrics [--config zigclaw.toml]
 zigclaw config validate [--config zigclaw.toml] [--format toml|text|json] [--json]
@@ -97,6 +103,7 @@ zigclaw replay capture --request-id <id> [--config zigclaw.toml]
 zigclaw replay run --capsule <path> [--config zigclaw.toml]
 zigclaw replay diff --a <path1> --b <path2>
 zigclaw gateway start [--bind 127.0.0.1] [--port 8787] [--config zigclaw.toml]
+zigclaw completion zsh|bash|fish
 ```
 
 ## Config
@@ -287,10 +294,13 @@ backoff_ms = 250
 
 ## Setup, Vault, Audit, Attestation, Replay, Update
 
-Interactive setup wizard:
+Unified onboarding flows:
 ```sh
+zig-out/bin/zigclaw init
+zig-out/bin/zigclaw init --guided
 zig-out/bin/zigclaw setup
 ```
+`init` now runs scaffold + post-setup checks (`zigclaw doctor`). `setup` runs the guided wizard path and offers optional plugin build.
 
 Encrypted vault secret management:
 ```sh
@@ -327,7 +337,14 @@ zig-out/bin/zigclaw doctor --config zigclaw.toml
 zig-out/bin/zigclaw doctor --config zigclaw.toml --json
 ```
 
-Most commands now support `--json` for machine-readable output (for example: `version`, `doctor`, `update`, `vault`, `init`, non-interactive `agent`, `prompt diff`, `config validate`, `policy hash`).
+Shell completions:
+```sh
+zig-out/bin/zigclaw completion zsh > ~/.zfunc/_zigclaw
+zig-out/bin/zigclaw completion bash > /etc/bash_completion.d/zigclaw
+zig-out/bin/zigclaw completion fish > ~/.config/fish/completions/zigclaw.fish
+```
+
+Most commands now support `--json` for machine-readable output (for example: `version`, `doctor`, `update`, `run summary`, `vault`, `init`, non-interactive `agent`, `prompt diff`, `config validate`, `policy hash`, and `queue watch`).
 
 ## Queue
 
@@ -336,11 +353,19 @@ Enqueue/run/status/cancel/metrics:
 zig-out/bin/zigclaw queue enqueue-agent --message "summarize status" --request-id req_demo_1 --config zigclaw.toml
 zig-out/bin/zigclaw queue worker --once --config zigclaw.toml
 zig-out/bin/zigclaw queue status --request-id req_demo_1 --config zigclaw.toml
+zig-out/bin/zigclaw queue watch --request-id req_demo_1 --poll-ms 500 --config zigclaw.toml
 zig-out/bin/zigclaw queue cancel --request-id req_demo_1 --config zigclaw.toml
 zig-out/bin/zigclaw queue metrics --config zigclaw.toml
+zig-out/bin/zigclaw run summary --request-id req_demo_1 --config zigclaw.toml
 ```
 
 Queue states: `queued`, `processing`, `completed`, `canceled`, `not_found`.
+
+Lightweight ops dashboard:
+```sh
+zig-out/bin/zigclaw ops summary --config zigclaw.toml
+zig-out/bin/zigclaw ops watch --poll-ms 1000 --config zigclaw.toml
+```
 
 ## Primitives and Git Persistence
 
@@ -371,12 +396,14 @@ Start local gateway:
 zig-out/bin/zigclaw gateway start --bind 127.0.0.1 --port 8787 --config zigclaw.toml
 ```
 
-On startup, gateway prints bearer token and token file path (`<workspace_root>/.zigclaw/gateway.token`).
+On startup, gateway prints bearer token, an Ops UI URL, and token file path (`<workspace_root>/.zigclaw/gateway.token`).
 
 Additional trigger-style endpoint:
 - `POST /v1/events` creates/updates primitive tasks from event payloads (`title`/`message`, `priority`, `owner`, `project`, `tags`, optional `idempotency_key`).
 - `GET /v1/receipts/<request_id>` returns attestation receipt JSON (when present).
 - `GET /v1/capsules/<request_id>` returns replay capsule JSON (when present).
+- `GET /ops?token=<gateway-token>[&limit=N&interval_ms=2000&view=state|full]` serves a lightweight auto-refreshing ops dashboard with filters.
+- `GET /v1/ops?limit=N&view=state|full` returns the dashboard snapshot as JSON (auth via bearer token; browser UI can use `?token=`).
 
 Health endpoint (no auth):
 ```sh
@@ -394,9 +421,15 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   http://127.0.0.1:8787/v1/tools/run
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/receipts/req_demo_1
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/capsules/req_demo_1
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/v1/ops
 ```
 
-Note: some gateway responses intentionally return embedded JSON as strings (`tools_json`, `manifest_json`, `result_json`).
+Browser dashboard:
+```sh
+open "http://127.0.0.1:8787/ops?token=$TOKEN"
+```
+
+Gateway responses now return nested JSON objects/arrays for tool listings/manifests/results (no embedded JSON strings).
 `POST /v1/agent` responses include `merkle_root` and `event_count` when `[attestation].enabled = true`.
 
 ## Observability and Audit Logs

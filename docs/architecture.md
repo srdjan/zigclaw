@@ -9,6 +9,7 @@ This document reflects the current implementation in `src/`.
 - Runtime diagnostics command (`zigclaw doctor`): `src/doctor.zig`
 - Interactive setup wizard and prompts: `src/setup/*.zig`
 - Binary self-update flow (`check` + atomic replace): `src/update/*.zig`
+- Shell completion generation and grouped help in CLI router: `src/main.zig`
 - Encrypted vault storage for secrets: `src/vault/*.zig`
 - Config parse/normalize/validate pipeline: `src/config.zig`
 - Compiled policy + policy hash + explain APIs: `src/policy.zig`
@@ -18,6 +19,7 @@ This document reflects the current implementation in `src/`.
 - Tool subsystem (manifest loading, schema validation, protocol runner): `src/tools/*.zig`
 - Queue worker and file-backed durable queue: `src/queue/worker.zig`
 - HTTP gateway with token auth and queue/tool/agent routes: `src/gateway/*.zig`
+- Run/ops UX surfaces (`run summary`, `ops summary|watch`, `queue watch`): `src/main.zig`
 - Audit reporting and receipt verification commands: `src/audit/*.zig`
 - Attestation receipt generation and verification: `src/attestation/*.zig`
 - Replay capsule capture/replay/diff: `src/replay/*.zig`
@@ -52,6 +54,8 @@ This document reflects the current implementation in `src/`.
 - Request-size and optional rate-limit checks happen before auth-protected route handling.
 - `POST /v1/events` can convert event payloads into primitive tasks with idempotency support.
 - `GET /v1/receipts/<request_id>` and `GET /v1/capsules/<request_id>` expose attestation/replay artifacts.
+- Tool routes now return nested JSON values (arrays/objects) rather than JSON-encoded strings.
+- Lightweight ops dashboard routes are available at `/ops` (HTML) and `/v1/ops` (JSON snapshot).
 
 ## Attestation and Replay boundary
 - Attestation receipts are stored at `<workspace_root>/.zigclaw/receipts/<request_id>.json`.

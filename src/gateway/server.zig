@@ -14,8 +14,8 @@ pub fn start(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.ValidatedC
     var obuf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
     try ow.interface.print(
-        "gateway listening on http://{s}:{d}\nAuthorization: Bearer {s}\n(token stored at {s})\n",
-        .{ bind, port, t.token, t.path },
+        "gateway listening on http://{s}:{d}\nAuthorization: Bearer {s}\nOps UI: http://{s}:{d}/ops?token={s}\n(token stored at {s})\n",
+        .{ bind, port, t.token, bind, port, t.token, t.path },
     );
     try ow.flush();
 
@@ -41,7 +41,7 @@ fn handleConn(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
         logger.logJson(a, .err, rid.slice(), .{ .error_name = @errorName(e), .context = "gateway.readRequest" });
         const body = try std.fmt.allocPrint(a, "{{\"request_id\":\"{s}\",\"error\":\"{s}\"}}", .{ rid.slice(), @errorName(e) });
         defer a.free(body);
-        const hdrs = [_]http.Header{ .{ .name = "x-request-id", .value = rid.slice() } };
+        const hdrs = [_]http.Header{.{ .name = "x-request-id", .value = rid.slice() }};
         try http.writeJsonWithHeaders(io, stream, switch (e) {
             error.RequestTooLarge => 413,
             else => 400,
@@ -64,12 +64,12 @@ fn handleConn(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
     var r = routes.handle(ta, io, app, cfg, req, token, rid.slice()) catch |e| {
         logger.logJson(ta, .err, rid.slice(), .{ .error_name = @errorName(e), .context = "gateway.routes.handle" });
         const body = try std.fmt.allocPrint(ta, "{{\"request_id\":\"{s}\",\"error\":\"{s}\"}}", .{ rid.slice(), @errorName(e) });
-        const hdrs = [_]http.Header{ .{ .name = "x-request-id", .value = rid.slice() } };
+        const hdrs = [_]http.Header{.{ .name = "x-request-id", .value = rid.slice() }};
         try http.writeJsonWithHeaders(io, stream, 500, body, &hdrs);
         return;
     };
     defer r.deinit(ta);
 
-    const hdrs = [_]http.Header{ .{ .name = "x-request-id", .value = rid.slice() } };
-    try http.writeJsonWithHeaders(io, stream, r.status, r.body, &hdrs);
+    const hdrs = [_]http.Header{.{ .name = "x-request-id", .value = rid.slice() }};
+    try http.writeResponseWithHeaders(io, stream, r.status, r.content_type, r.body, &hdrs);
 }

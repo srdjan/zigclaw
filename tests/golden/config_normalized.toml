@@ -45,14 +45,14 @@ workspace_root = "."
 max_request_bytes = 262144
 
 [providers.primary]
-kind = "openai_compat"
+kind = "openai_compat" # "stub" | "openai_compat"
 model = "gpt-4.1-mini"
 temperature = 0.2
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 
 [providers.fixtures]
-mode = "off"
+mode = "off" # "off" | "record" | "replay" | "capsule_replay"
 dir = "./.zigclaw/fixtures"
 capsule_path = ""
 

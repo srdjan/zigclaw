@@ -654,6 +654,73 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             try ow.flush();
             return;
         }
+        if (std.mem.eql(u8, sub, "diff")) {
+            const a_path = flagValue(argv, "--a") orelse return error.InvalidArgs;
+            const b_path = flagValue(argv, "--b") orelse return error.InvalidArgs;
+            const as_json = hasFlag(argv, "--json");
+
+            const entries = try config_mod.semanticDiff(a, io, a_path, b_path);
+            defer config_mod.freeDiffEntries(a, entries);
+
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            if (as_json) {
+                var aw: std.Io.Writer.Allocating = .init(a);
+                defer aw.deinit();
+                var stream: std.json.Stringify = .{ .writer = &aw.writer };
+                try stream.beginObject();
+                try stream.objectField("a");
+                try stream.write(a_path);
+                try stream.objectField("b");
+                try stream.write(b_path);
+                try stream.objectField("changes");
+                try stream.beginArray();
+                for (entries) |e| {
+                    try stream.beginObject();
+                    try stream.objectField("key");
+                    try stream.write(e.key);
+                    try stream.objectField("kind");
+                    try stream.write(@tagName(e.kind));
+                    if (e.kind != .added) {
+                        try stream.objectField("old");
+                        try stream.write(e.old_value);
+                    }
+                    if (e.kind != .removed) {
+                        try stream.objectField("new");
+                        try stream.write(e.new_value);
+                    }
+                    try stream.endObject();
+                }
+                try stream.endArray();
+                try stream.endObject();
+                const out = try aw.toOwnedSlice();
+                defer a.free(out);
+                try ow.interface.print("{s}\n", .{out});
+            } else {
+                if (entries.len == 0) {
+                    try ow.interface.writeAll("no differences\n");
+                } else {
+                    for (entries) |e| {
+                        switch (e.kind) {
+                            .changed => try ow.interface.print("~ {s}: {s} -> {s}\n", .{ e.key, e.old_value, e.new_value }),
+                            .added => try ow.interface.print("+ {s}: {s}\n", .{ e.key, e.new_value }),
+                            .removed => try ow.interface.print("- {s}: {s}\n", .{ e.key, e.old_value }),
+                        }
+                    }
+                }
+            }
+            try ow.flush();
+            return;
+        }
+        if (std.mem.eql(u8, sub, "schema")) {
+            const out = config_mod.jsonSchemaAlloc(a);
+            defer a.free(out);
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+            return;
+        }
         try usageConfig(io);
         return;
     }
@@ -1525,28 +1592,7 @@ fn unknownCommand(io: std.Io, cmd: []const u8) !void {
     try ew.flush();
 }
 
-fn levenshtein(a_str: []const u8, b_str: []const u8) usize {
-    if (a_str.len == 0) return b_str.len;
-    if (b_str.len == 0) return a_str.len;
-    if (b_str.len > 32) return b_str.len; // bail on long strings
-
-    var prev_row: [33]usize = undefined;
-    for (0..b_str.len + 1) |i| prev_row[i] = i;
-
-    for (a_str, 0..) |a_ch, i| {
-        var cur_row: [33]usize = undefined;
-        cur_row[0] = i + 1;
-        for (b_str, 0..) |b_ch, j| {
-            const cost: usize = if (a_ch == b_ch) 0 else 1;
-            cur_row[j + 1] = @min(@min(
-                cur_row[j] + 1,
-                prev_row[j + 1] + 1,
-            ), prev_row[j] + cost);
-        }
-        prev_row = cur_row;
-    }
-    return prev_row[b_str.len];
-}
+const levenshtein = @import("util/str.zig").levenshtein;
 
 fn flagValue(argv: []const [:0]const u8, name: []const u8) ?[]const u8 {
     var i: usize = 0;
@@ -2204,11 +2250,15 @@ fn usageConfig(io: std.Io) !void {
         \\config
         \\Usage:
         \\  zigclaw config validate [--config zigclaw.toml] [--format toml|text|json] [--json]
+        \\  zigclaw config diff --a <file1.toml> --b <file2.toml> [--json]
+        \\  zigclaw config schema
         \\
         \\Examples:
         \\  zigclaw config validate --format toml
         \\  zigclaw config validate --format json
         \\  zigclaw config validate --json
+        \\  zigclaw config diff --a zigclaw.toml --b zigclaw.prod.toml
+        \\  zigclaw config schema > zigclaw.schema.json
         \\
         \\Related:
         \\  zigclaw policy --help

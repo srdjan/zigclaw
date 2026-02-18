@@ -209,11 +209,13 @@ pub const ValidatedConfig = struct {
     raw: Config,
     policy: policy_mod.Policy,
     warnings: []Warning,
+    comments: CommentMap,
 
     pub fn deinit(self: *ValidatedConfig, a: std.mem.Allocator) void {
         self.policy.deinit(a);
         freeConfigStrings(a, &self.raw);
         freeWarnings(a, self.warnings);
+        self.comments.deinit(a);
     }
 
     pub fn print(self: ValidatedConfig, w: *std.Io.Writer) !void {
@@ -306,19 +308,25 @@ pub const ValidatedConfig = struct {
     }
 
     pub fn printNormalizedToml(self: ValidatedConfig, a: std.mem.Allocator, w: *std.Io.Writer) !void {
+        const cm = self.comments;
         // Stable ordering output (minimal TOML). DO NOT print secrets.
-        try w.print("config_version = {d}\n", .{self.raw.config_version});
+        try w.print("config_version = {d}", .{self.raw.config_version});
+        try writeInlineComment(w, cm, "config_version");
+        try w.writeAll("\n");
         if (self.raw.vault_path.len > 0) {
             try w.writeAll("vault_path = ");
             try writeTomlString(w, self.raw.vault_path);
+            try writeInlineComment(w, cm, "vault_path");
             try w.writeAll("\n");
         }
         try w.writeAll("\n");
 
         // [capabilities]
+        try writeSectionComment(w, cm, "capabilities");
         try w.writeAll("[capabilities]\n");
         try w.writeAll("active_preset = ");
         try writeTomlString(w, self.raw.capabilities.active_preset);
+        try writeInlineComment(w, cm, "capabilities.active_preset");
         try w.writeAll("\n\n");
 
         // presets sorted by name
@@ -346,9 +354,11 @@ pub const ValidatedConfig = struct {
 
         // [orchestration] and [agents.<id>] are printed only when configured.
         if (self.raw.orchestration.leader_agent.len > 0 or self.raw.orchestration.agents.len > 0) {
+            try writeSectionComment(w, cm, "orchestration");
             try w.writeAll("[orchestration]\n");
             try w.writeAll("leader_agent = ");
             try writeTomlString(w, self.raw.orchestration.leader_agent);
+            try writeInlineComment(w, cm, "orchestration.leader_agent");
             try w.writeAll("\n\n");
 
             const agents = self.raw.orchestration.agents;
@@ -403,90 +413,143 @@ pub const ValidatedConfig = struct {
         }
 
         // [observability]
+        try writeSectionComment(w, cm, "observability");
         try w.writeAll("[observability]\n");
-        try w.print("enabled = {s}\n", .{if (self.raw.observability.enabled) "true" else "false"});
+        try w.print("enabled = {s}", .{if (self.raw.observability.enabled) "true" else "false"});
+        try writeInlineComment(w, cm, "observability.enabled");
+        try w.writeAll("\n");
         try w.writeAll("dir = ");
         try writeTomlString(w, self.raw.observability.dir);
+        try writeInlineComment(w, cm, "observability.dir");
         try w.writeAll("\n");
-        try w.print("max_file_bytes = {d}\n", .{self.raw.observability.max_file_bytes});
-        try w.print("max_files = {d}\n\n", .{self.raw.observability.max_files});
+        try w.print("max_file_bytes = {d}", .{self.raw.observability.max_file_bytes});
+        try writeInlineComment(w, cm, "observability.max_file_bytes");
+        try w.writeAll("\n");
+        try w.print("max_files = {d}", .{self.raw.observability.max_files});
+        try writeInlineComment(w, cm, "observability.max_files");
+        try w.writeAll("\n\n");
 
         // [logging]
+        try writeSectionComment(w, cm, "logging");
         try w.writeAll("[logging]\n");
-        try w.print("enabled = {s}\n", .{if (self.raw.logging.enabled) "true" else "false"});
+        try w.print("enabled = {s}", .{if (self.raw.logging.enabled) "true" else "false"});
+        try writeInlineComment(w, cm, "logging.enabled");
+        try w.writeAll("\n");
         try w.writeAll("dir = ");
         try writeTomlString(w, self.raw.logging.dir);
+        try writeInlineComment(w, cm, "logging.dir");
         try w.writeAll("\n");
         try w.writeAll("file = ");
         try writeTomlString(w, self.raw.logging.file);
+        try writeInlineComment(w, cm, "logging.file");
         try w.writeAll("\n");
-        try w.print("max_file_bytes = {d}\n", .{self.raw.logging.max_file_bytes});
-        try w.print("max_files = {d}\n\n", .{self.raw.logging.max_files});
+        try w.print("max_file_bytes = {d}", .{self.raw.logging.max_file_bytes});
+        try writeInlineComment(w, cm, "logging.max_file_bytes");
+        try w.writeAll("\n");
+        try w.print("max_files = {d}", .{self.raw.logging.max_files});
+        try writeInlineComment(w, cm, "logging.max_files");
+        try w.writeAll("\n\n");
 
         // [attestation]
+        try writeSectionComment(w, cm, "attestation");
         try w.writeAll("[attestation]\n");
-        try w.print("enabled = {s}\n\n", .{if (self.raw.attestation.enabled) "true" else "false"});
+        try w.print("enabled = {s}", .{if (self.raw.attestation.enabled) "true" else "false"});
+        try writeInlineComment(w, cm, "attestation.enabled");
+        try w.writeAll("\n\n");
 
         // [replay]
+        try writeSectionComment(w, cm, "replay");
         try w.writeAll("[replay]\n");
-        try w.print("enabled = {s}\n\n", .{if (self.raw.replay.enabled) "true" else "false"});
+        try w.print("enabled = {s}", .{if (self.raw.replay.enabled) "true" else "false"});
+        try writeInlineComment(w, cm, "replay.enabled");
+        try w.writeAll("\n\n");
 
         // [gateway]
+        try writeSectionComment(w, cm, "gateway");
         try w.writeAll("[gateway]\n");
-        try w.print("rate_limit_enabled = {s}\n", .{if (self.raw.gateway.rate_limit_enabled) "true" else "false"});
+        try w.print("rate_limit_enabled = {s}", .{if (self.raw.gateway.rate_limit_enabled) "true" else "false"});
+        try writeInlineComment(w, cm, "gateway.rate_limit_enabled");
+        try w.writeAll("\n");
         try w.writeAll("rate_limit_store = ");
         try writeTomlString(w, @tagName(self.raw.gateway.rate_limit_store));
+        try writeInlineComment(w, cm, "gateway.rate_limit_store");
         try w.writeAll("\n");
-        try w.print("rate_limit_window_ms = {d}\n", .{self.raw.gateway.rate_limit_window_ms});
-        try w.print("rate_limit_max_requests = {d}\n", .{self.raw.gateway.rate_limit_max_requests});
+        try w.print("rate_limit_window_ms = {d}", .{self.raw.gateway.rate_limit_window_ms});
+        try writeInlineComment(w, cm, "gateway.rate_limit_window_ms");
+        try w.writeAll("\n");
+        try w.print("rate_limit_max_requests = {d}", .{self.raw.gateway.rate_limit_max_requests});
+        try writeInlineComment(w, cm, "gateway.rate_limit_max_requests");
+        try w.writeAll("\n");
         try w.writeAll("rate_limit_dir = ");
         try writeTomlString(w, self.raw.gateway.rate_limit_dir);
+        try writeInlineComment(w, cm, "gateway.rate_limit_dir");
         try w.writeAll("\n\n");
 
         // [security]
+        try writeSectionComment(w, cm, "security");
         try w.writeAll("[security]\n");
         try w.writeAll("workspace_root = ");
         try writeTomlString(w, self.raw.security.workspace_root);
+        try writeInlineComment(w, cm, "security.workspace_root");
         try w.writeAll("\n");
-        try w.print("max_request_bytes = {d}\n\n", .{self.raw.security.max_request_bytes});
+        try w.print("max_request_bytes = {d}", .{self.raw.security.max_request_bytes});
+        try writeInlineComment(w, cm, "security.max_request_bytes");
+        try w.writeAll("\n\n");
 
         // [providers.primary]
+        try writeSectionComment(w, cm, "providers.primary");
         try w.writeAll("[providers.primary]\n");
         try w.writeAll("kind = ");
         try writeTomlString(w, @tagName(self.raw.provider_primary.kind));
+        try writeInlineComment(w, cm, "providers.primary.kind");
         try w.writeAll("\n");
         try w.writeAll("model = ");
         try writeTomlString(w, self.raw.provider_primary.model);
+        try writeInlineComment(w, cm, "providers.primary.model");
         try w.writeAll("\n");
-        try w.print("temperature = {d}\n", .{self.raw.provider_primary.temperature});
+        try w.print("temperature = {d}", .{self.raw.provider_primary.temperature});
+        try writeInlineComment(w, cm, "providers.primary.temperature");
+        try w.writeAll("\n");
         try w.writeAll("base_url = ");
         try writeTomlString(w, self.raw.provider_primary.base_url);
+        try writeInlineComment(w, cm, "providers.primary.base_url");
         try w.writeAll("\n");
         if (self.raw.provider_primary.api_key_vault.len > 0) {
             try w.writeAll("api_key_vault = ");
             try writeTomlString(w, self.raw.provider_primary.api_key_vault);
+            try writeInlineComment(w, cm, "providers.primary.api_key_vault");
             try w.writeAll("\n");
         }
         try w.writeAll("api_key_env = ");
         try writeTomlString(w, self.raw.provider_primary.api_key_env);
+        try writeInlineComment(w, cm, "providers.primary.api_key_env");
         try w.writeAll("\n\n");
 
         // [providers.fixtures]
+        try writeSectionComment(w, cm, "providers.fixtures");
         try w.writeAll("[providers.fixtures]\n");
         try w.writeAll("mode = ");
         try writeTomlString(w, @tagName(self.raw.provider_fixtures.mode));
+        try writeInlineComment(w, cm, "providers.fixtures.mode");
         try w.writeAll("\n");
         try w.writeAll("dir = ");
         try writeTomlString(w, self.raw.provider_fixtures.dir);
+        try writeInlineComment(w, cm, "providers.fixtures.dir");
         try w.writeAll("\n");
         try w.writeAll("capsule_path = ");
         try writeTomlString(w, self.raw.provider_fixtures.capsule_path);
+        try writeInlineComment(w, cm, "providers.fixtures.capsule_path");
         try w.writeAll("\n\n");
 
         // [providers.reliable]
+        try writeSectionComment(w, cm, "providers.reliable");
         try w.writeAll("[providers.reliable]\n");
-        try w.print("retries = {d}\n", .{self.raw.provider_reliable.retries});
-        try w.print("backoff_ms = {d}\n\n", .{self.raw.provider_reliable.backoff_ms});
+        try w.print("retries = {d}", .{self.raw.provider_reliable.retries});
+        try writeInlineComment(w, cm, "providers.reliable.retries");
+        try w.writeAll("\n");
+        try w.print("backoff_ms = {d}", .{self.raw.provider_reliable.backoff_ms});
+        try writeInlineComment(w, cm, "providers.reliable.backoff_ms");
+        try w.writeAll("\n\n");
 
         // [providers.<name>] - named providers sorted by name
         if (self.raw.provider_named.len > 0) {
@@ -533,79 +596,121 @@ pub const ValidatedConfig = struct {
         }
 
         // [memory]
+        try writeSectionComment(w, cm, "memory");
         try w.writeAll("[memory]\n");
         try w.writeAll("backend = ");
         try writeTomlString(w, @tagName(self.raw.memory.backend));
+        try writeInlineComment(w, cm, "memory.backend");
         try w.writeAll("\n");
         try w.writeAll("root = ");
         try writeTomlString(w, self.raw.memory.root);
+        try writeInlineComment(w, cm, "memory.root");
         try w.writeAll("\n\n");
 
         // [memory.primitives]
+        try writeSectionComment(w, cm, "memory.primitives");
         try w.writeAll("[memory.primitives]\n");
-        try w.print("enabled = {s}\n", .{if (self.raw.memory.primitives.enabled) "true" else "false"});
+        try w.print("enabled = {s}", .{if (self.raw.memory.primitives.enabled) "true" else "false"});
+        try writeInlineComment(w, cm, "memory.primitives.enabled");
+        try w.writeAll("\n");
         try w.writeAll("templates_dir = ");
         try writeTomlString(w, self.raw.memory.primitives.templates_dir);
+        try writeInlineComment(w, cm, "memory.primitives.templates_dir");
         try w.writeAll("\n");
-        try w.print("strict_schema = {s}\n\n", .{if (self.raw.memory.primitives.strict_schema) "true" else "false"});
+        try w.print("strict_schema = {s}", .{if (self.raw.memory.primitives.strict_schema) "true" else "false"});
+        try writeInlineComment(w, cm, "memory.primitives.strict_schema");
+        try w.writeAll("\n\n");
 
         // [tools]
+        try writeSectionComment(w, cm, "tools");
         try w.writeAll("[tools]\n");
         try w.writeAll("wasmtime_path = ");
         try writeTomlString(w, self.raw.tools.wasmtime_path);
+        try writeInlineComment(w, cm, "tools.wasmtime_path");
         try w.writeAll("\n");
         try w.writeAll("plugin_dir = ");
         try writeTomlString(w, self.raw.tools.plugin_dir);
+        try writeInlineComment(w, cm, "tools.plugin_dir");
         try w.writeAll("\n\n");
 
         // [tools.registry]
+        try writeSectionComment(w, cm, "tools.registry");
         try w.writeAll("[tools.registry]\n");
-        try w.print("strict = {s}\n\n", .{if (self.raw.tools.registry.strict) "true" else "false"});
+        try w.print("strict = {s}", .{if (self.raw.tools.registry.strict) "true" else "false"});
+        try writeInlineComment(w, cm, "tools.registry.strict");
+        try w.writeAll("\n\n");
 
         // [queue]
+        try writeSectionComment(w, cm, "queue");
         try w.writeAll("[queue]\n");
         try w.writeAll("dir = ");
         try writeTomlString(w, self.raw.queue.dir);
+        try writeInlineComment(w, cm, "queue.dir");
         try w.writeAll("\n");
-        try w.print("poll_ms = {d}\n", .{self.raw.queue.poll_ms});
-        try w.print("max_retries = {d}\n", .{self.raw.queue.max_retries});
-        try w.print("retry_backoff_ms = {d}\n", .{self.raw.queue.retry_backoff_ms});
-        try w.print("retry_jitter_pct = {d}\n\n", .{self.raw.queue.retry_jitter_pct});
+        try w.print("poll_ms = {d}", .{self.raw.queue.poll_ms});
+        try writeInlineComment(w, cm, "queue.poll_ms");
+        try w.writeAll("\n");
+        try w.print("max_retries = {d}", .{self.raw.queue.max_retries});
+        try writeInlineComment(w, cm, "queue.max_retries");
+        try w.writeAll("\n");
+        try w.print("retry_backoff_ms = {d}", .{self.raw.queue.retry_backoff_ms});
+        try writeInlineComment(w, cm, "queue.retry_backoff_ms");
+        try w.writeAll("\n");
+        try w.print("retry_jitter_pct = {d}", .{self.raw.queue.retry_jitter_pct});
+        try writeInlineComment(w, cm, "queue.retry_jitter_pct");
+        try w.writeAll("\n\n");
 
         // [automation]
+        try writeSectionComment(w, cm, "automation");
         try w.writeAll("[automation]\n");
-        try w.print("task_pickup_enabled = {s}\n", .{if (self.raw.automation.task_pickup_enabled) "true" else "false"});
+        try w.print("task_pickup_enabled = {s}", .{if (self.raw.automation.task_pickup_enabled) "true" else "false"});
+        try writeInlineComment(w, cm, "automation.task_pickup_enabled");
+        try w.writeAll("\n");
         try w.writeAll("default_owner = ");
         try writeTomlString(w, self.raw.automation.default_owner);
+        try writeInlineComment(w, cm, "automation.default_owner");
         try w.writeAll("\n");
         try w.writeAll("pickup_statuses = ");
         try writeTomlStringArray(w, self.raw.automation.pickup_statuses);
+        try writeInlineComment(w, cm, "automation.pickup_statuses");
         try w.writeAll("\n\n");
 
         // [persistence.git]
+        try writeSectionComment(w, cm, "persistence.git");
         try w.writeAll("[persistence.git]\n");
-        try w.print("enabled = {s}\n", .{if (self.raw.persistence.git.enabled) "true" else "false"});
+        try w.print("enabled = {s}", .{if (self.raw.persistence.git.enabled) "true" else "false"});
+        try writeInlineComment(w, cm, "persistence.git.enabled");
+        try w.writeAll("\n");
         try w.writeAll("repo_dir = ");
         try writeTomlString(w, self.raw.persistence.git.repo_dir);
+        try writeInlineComment(w, cm, "persistence.git.repo_dir");
         try w.writeAll("\n");
         try w.writeAll("author_name = ");
         try writeTomlString(w, self.raw.persistence.git.author_name);
+        try writeInlineComment(w, cm, "persistence.git.author_name");
         try w.writeAll("\n");
         try w.writeAll("author_email = ");
         try writeTomlString(w, self.raw.persistence.git.author_email);
+        try writeInlineComment(w, cm, "persistence.git.author_email");
         try w.writeAll("\n");
         try w.writeAll("default_branch = ");
         try writeTomlString(w, self.raw.persistence.git.default_branch);
+        try writeInlineComment(w, cm, "persistence.git.default_branch");
         try w.writeAll("\n");
         try w.writeAll("allow_paths = ");
         try writeTomlStringArray(w, self.raw.persistence.git.allow_paths);
+        try writeInlineComment(w, cm, "persistence.git.allow_paths");
         try w.writeAll("\n");
         try w.writeAll("deny_paths = ");
         try writeTomlStringArray(w, self.raw.persistence.git.deny_paths);
+        try writeInlineComment(w, cm, "persistence.git.deny_paths");
         try w.writeAll("\n");
-        try w.print("push_default = {s}\n", .{if (self.raw.persistence.git.push_default) "true" else "false"});
+        try w.print("push_default = {s}", .{if (self.raw.persistence.git.push_default) "true" else "false"});
+        try writeInlineComment(w, cm, "persistence.git.push_default");
+        try w.writeAll("\n");
         try w.writeAll("remote_name = ");
         try writeTomlString(w, self.raw.persistence.git.remote_name);
+        try writeInlineComment(w, cm, "persistence.git.remote_name");
         try w.writeAll("\n");
     }
 };
@@ -613,26 +718,27 @@ pub const ValidatedConfig = struct {
 pub fn loadAndValidate(a: std.mem.Allocator, io: std.Io, path: []const u8) !ValidatedConfig {
     const content = std.Io.Dir.cwd().readFileAlloc(io, path, a, std.Io.Limit.limited(1024 * 1024)) catch |e| {
         std.log.warn("config file not found ({s}); using defaults: {any}", .{ path, e });
-        return validate(a, Config{}, &.{});
+        return validate(a, Config{}, &.{}, CommentMap.init(a));
     };
     defer a.free(content);
 
     var parsed = try tomlParseKeyMap(a, content);
-    defer parsed.deinit(a);
+    // Transfer comment ownership to ValidatedConfig; only free keys on deinit.
+    defer parsed.keys.deinit(a);
 
     var built = try buildTypedConfig(a, parsed);
     errdefer built.deinit(a);
 
-    return validate(a, built.cfg, built.warnings);
+    return validate(a, built.cfg, built.warnings, parsed.comments);
 }
 
 pub fn loadAndValidateFromConfig(a: std.mem.Allocator, cfg: Config) !ValidatedConfig {
-    return validate(a, cfg, &.{});
+    return validate(a, cfg, &.{}, CommentMap.init(a));
 }
 
-fn validate(a: std.mem.Allocator, cfg: Config, warnings: []Warning) !ValidatedConfig {
+fn validate(a: std.mem.Allocator, cfg: Config, warnings: []Warning, comments: CommentMap) !ValidatedConfig {
     const pol = try policy_mod.Policy.fromConfig(a, cfg.capabilities, cfg.security.workspace_root);
-    return .{ .raw = cfg, .policy = pol, .warnings = warnings };
+    return .{ .raw = cfg, .policy = pol, .warnings = warnings, .comments = comments };
 }
 
 // -----------------------------
@@ -675,26 +781,88 @@ const KeyMap = struct {
     }
 };
 
+/// Stores comments from the original TOML file, separated into inline
+/// comments ("key = val # comment") and block comments (standalone # lines
+/// preceding a key or section header).
+pub const CommentMap = struct {
+    /// Inline comments keyed by TOML key path (e.g. "providers.primary.kind").
+    inline_comments: std.StringHashMap([]const u8),
+    /// Block comments keyed by TOML key path or "@section.path" for sections.
+    block_comments: std.StringHashMap([]const u8),
+
+    pub fn init(a: std.mem.Allocator) CommentMap {
+        return .{
+            .inline_comments = std.StringHashMap([]const u8).init(a),
+            .block_comments = std.StringHashMap([]const u8).init(a),
+        };
+    }
+
+    pub fn deinit(self: *CommentMap, a: std.mem.Allocator) void {
+        var it = self.inline_comments.iterator();
+        while (it.next()) |e| {
+            a.free(e.key_ptr.*);
+            a.free(e.value_ptr.*);
+        }
+        self.inline_comments.deinit();
+        var it2 = self.block_comments.iterator();
+        while (it2.next()) |e| {
+            a.free(e.key_ptr.*);
+            a.free(e.value_ptr.*);
+        }
+        self.block_comments.deinit();
+    }
+
+    pub fn getInline(self: CommentMap, key: []const u8) ?[]const u8 {
+        return self.inline_comments.get(key);
+    }
+
+    pub fn getBlock(self: CommentMap, key: []const u8) ?[]const u8 {
+        return self.block_comments.get(key);
+    }
+};
+
 const ParseResult = struct {
     keys: KeyMap,
+    comments: CommentMap,
     pub fn deinit(self: *ParseResult, a: std.mem.Allocator) void {
         self.keys.deinit(a);
+        self.comments.deinit(a);
     }
 };
 
 fn tomlParseKeyMap(a: std.mem.Allocator, input: []const u8) !ParseResult {
     var km = KeyMap.init(a);
+    var cm = CommentMap.init(a);
 
     var table_prefix = std.array_list.Managed([]const u8).init(a);
     defer table_prefix.deinit();
 
+    // Accumulator for standalone comment lines preceding a key or section.
+    var pending_block_comment = std.array_list.Managed(u8).init(a);
+    defer pending_block_comment.deinit();
+
     var lines = std.mem.splitScalar(u8, input, '\n');
     while (lines.next()) |raw_line| {
         const line0 = std.mem.trim(u8, raw_line, " \t\r");
-        if (line0.len == 0) continue;
+        if (line0.len == 0) {
+            // Blank line resets the block comment accumulator.
+            pending_block_comment.clearRetainingCapacity();
+            continue;
+        }
 
+        // Extract inline comment (the part after #).
         const hash = std.mem.indexOfScalar(u8, line0, '#');
         const line = std.mem.trim(u8, if (hash) |i| line0[0..i] else line0, " \t\r");
+
+        // Full-line comment: accumulate for the next key/section.
+        if (line.len == 0 and hash != null) {
+            const comment_text = std.mem.trim(u8, line0[hash.? + 1 ..], " \t");
+            if (pending_block_comment.items.len > 0) {
+                try pending_block_comment.append('\n');
+            }
+            try pending_block_comment.appendSlice(comment_text);
+            continue;
+        }
         if (line.len == 0) continue;
 
         if (line[0] == '[' and line[line.len - 1] == ']') {
@@ -705,6 +873,12 @@ fn tomlParseKeyMap(a: std.mem.Allocator, input: []const u8) !ParseResult {
                 const seg = std.mem.trim(u8, seg0, " \t");
                 if (seg.len == 0) continue;
                 try table_prefix.append(seg);
+            }
+            // Store block comment for the section header itself.
+            if (pending_block_comment.items.len > 0) {
+                const section_key = try joinSectionKey(a, table_prefix.items);
+                try cm.block_comments.put(section_key, try a.dupe(u8, pending_block_comment.items));
+                pending_block_comment.clearRetainingCapacity();
             }
             continue;
         }
@@ -725,9 +899,49 @@ fn tomlParseKeyMap(a: std.mem.Allocator, input: []const u8) !ParseResult {
             _ = km.map.remove(key_path);
         }
         try km.map.put(key_path, val);
+
+        // Store inline comment (text after # on this key=value line).
+        const inline_comment = if (hash) |h| std.mem.trim(u8, line0[h + 1 ..], " \t") else "";
+        if (inline_comment.len > 0) {
+            try cm.inline_comments.put(
+                try a.dupe(u8, key_path),
+                try a.dupe(u8, inline_comment),
+            );
+        }
+
+        // Store block comment (accumulated standalone # lines before this key).
+        if (pending_block_comment.items.len > 0) {
+            try cm.block_comments.put(
+                try a.dupe(u8, key_path),
+                try a.dupe(u8, pending_block_comment.items),
+            );
+            pending_block_comment.clearRetainingCapacity();
+        }
     }
 
-    return .{ .keys = km };
+    return .{ .keys = km, .comments = cm };
+}
+
+fn joinSectionKey(a: std.mem.Allocator, parts: []const []const u8) ![]const u8 {
+    if (parts.len == 0) return try a.dupe(u8, "");
+    var total: usize = 0;
+    for (parts, 0..) |p, i| {
+        total += p.len;
+        if (i > 0) total += 1;
+    }
+    // Prefix with @ to distinguish section comments from key comments.
+    var out = try a.alloc(u8, total + 1);
+    out[0] = '@';
+    var pos: usize = 1;
+    for (parts, 0..) |p, i| {
+        if (i > 0) {
+            out[pos] = '.';
+            pos += 1;
+        }
+        std.mem.copyForwards(u8, out[pos..][0..p.len], p);
+        pos += p.len;
+    }
+    return out;
 }
 
 fn joinKeyPath(a: std.mem.Allocator, prefix: []const []const u8, leaf: []const u8) ![]const u8 {
@@ -1605,8 +1819,143 @@ fn findAgentById(agents: []const AgentProfileConfig, id: []const u8) ?AgentProfi
     return null;
 }
 
+const str_util = @import("util/str.zig");
+
+/// All known scalar config key paths used by buildTypedConfig.
+const known_config_keys = [_][]const u8{
+    "config_version",
+    "meta.config_version",
+    "vault_path",
+    "capabilities.active_preset",
+    "orchestration.leader_agent",
+    "observability.enabled",
+    "observability.dir",
+    "observability.max_file_bytes",
+    "observability.max_files",
+    "logging.enabled",
+    "logging.dir",
+    "logging.file",
+    "logging.max_file_bytes",
+    "logging.max_files",
+    "attestation.enabled",
+    "replay.enabled",
+    "gateway.rate_limit_enabled",
+    "gateway.rate_limit_window_ms",
+    "gateway.rate_limit_max_requests",
+    "gateway.rate_limit_store",
+    "gateway.rate_limit_dir",
+    "security.workspace_root",
+    "security.max_request_bytes",
+    "tools.wasmtime_path",
+    "tools.plugin_dir",
+    "tools.registry.strict",
+    "queue.dir",
+    "queue.poll_ms",
+    "queue.max_retries",
+    "queue.retry_backoff_ms",
+    "queue.retry_jitter_pct",
+    "providers.primary.kind",
+    "providers.primary.model",
+    "providers.primary.temperature",
+    "providers.primary.base_url",
+    "providers.primary.api_key",
+    "providers.primary.api_key_vault",
+    "providers.primary.api_key_env",
+    "providers.fixtures.mode",
+    "providers.fixtures.dir",
+    "providers.fixtures.capsule_path",
+    "providers.reliable.retries",
+    "providers.reliable.backoff_ms",
+    "memory.backend",
+    "memory.root",
+    "memory.primitives.enabled",
+    "memory.primitives.templates_dir",
+    "memory.primitives.strict_schema",
+    "automation.task_pickup_enabled",
+    "automation.default_owner",
+    "automation.pickup_statuses",
+    "persistence.git.enabled",
+    "persistence.git.repo_dir",
+    "persistence.git.author_name",
+    "persistence.git.author_email",
+    "persistence.git.default_branch",
+    "persistence.git.allow_paths",
+    "persistence.git.deny_paths",
+    "persistence.git.push_default",
+    "persistence.git.remote_name",
+};
+
+/// Known field suffixes for dynamic sections (agents.*, providers.*, presets.*).
+const known_agent_fields = [_][]const u8{
+    "capability_preset",
+    "delegate_to",
+    "system_prompt",
+    "provider",
+    "provider_model",
+    "provider_temperature",
+    "provider_base_url",
+    "provider_api_key_env",
+};
+
+const known_named_provider_fields = [_][]const u8{
+    "kind",
+    "model",
+    "temperature",
+    "base_url",
+    "api_key",
+    "api_key_vault",
+    "api_key_env",
+};
+
+const known_preset_fields = [_][]const u8{
+    "tools",
+    "allow_network",
+    "allow_write_paths",
+};
+
 fn unknownKeyWarn(a: std.mem.Allocator, warns: *std.array_list.Managed(Warning), k: []const u8) !void {
-    try warns.append(.{ .key_path = try a.dupe(u8, k), .message = try a.dupe(u8, "unknown key (ignored)") });
+    // Try to find a close match to suggest.
+    const suggestion = findKeySuggestion(k);
+    if (suggestion) |s| {
+        try warns.append(.{
+            .key_path = try a.dupe(u8, k),
+            .message = try std.fmt.allocPrint(a, "unknown key (ignored); did you mean '{s}'?", .{s}),
+        });
+    } else {
+        try warns.append(.{ .key_path = try a.dupe(u8, k), .message = try a.dupe(u8, "unknown key (ignored)") });
+    }
+}
+
+fn findKeySuggestion(k: []const u8) ?[]const u8 {
+    // For dynamic sections, check field suffixes.
+    if (std.mem.startsWith(u8, k, "agents.")) {
+        const rest = k["agents.".len..];
+        if (std.mem.indexOfScalar(u8, rest, '.')) |dot| {
+            const field = rest[dot + 1 ..];
+            return str_util.closestMatch(field, &known_agent_fields, 2);
+        }
+    }
+    if (std.mem.startsWith(u8, k, "capabilities.presets.")) {
+        const rest = k["capabilities.presets.".len..];
+        if (std.mem.indexOfScalar(u8, rest, '.')) |dot| {
+            const field = rest[dot + 1 ..];
+            return str_util.closestMatch(field, &known_preset_fields, 2);
+        }
+    }
+    if (std.mem.startsWith(u8, k, "providers.")) {
+        const rest = k["providers.".len..];
+        if (!std.mem.startsWith(u8, rest, "primary.") and
+            !std.mem.startsWith(u8, rest, "fixtures.") and
+            !std.mem.startsWith(u8, rest, "reliable."))
+        {
+            if (std.mem.indexOfScalar(u8, rest, '.')) |dot| {
+                const field = rest[dot + 1 ..];
+                return str_util.closestMatch(field, &known_named_provider_fields, 2);
+            }
+        }
+    }
+    // Fall back to checking full key paths.
+    return str_util.closestMatch(k, &known_config_keys, 2);
 }
 
 fn coerceString(v: Value) ![]const u8 {
@@ -1779,6 +2128,418 @@ fn freeWarnings(a: std.mem.Allocator, warnings: []Warning) void {
         a.free(w.message);
     }
     if (warnings.len > 0) a.free(warnings);
+}
+
+// --------------------------------
+// Semantic config diff
+// --------------------------------
+
+pub const DiffEntry = struct {
+    key: []const u8,
+    kind: enum { changed, added, removed },
+    old_value: []const u8,
+    new_value: []const u8,
+};
+
+/// Compare two config files semantically by parsing both into flat key maps and
+/// reporting added, removed, and changed keys. Caller owns the returned slice
+/// and all strings within it (allocated with `a`).
+pub fn semanticDiff(a: std.mem.Allocator, io: std.Io, path_a: []const u8, path_b: []const u8) ![]DiffEntry {
+    const content_a = try std.Io.Dir.cwd().readFileAlloc(io, path_a, a, std.Io.Limit.limited(1024 * 1024));
+    defer a.free(content_a);
+    const content_b = try std.Io.Dir.cwd().readFileAlloc(io, path_b, a, std.Io.Limit.limited(1024 * 1024));
+    defer a.free(content_b);
+
+    var parsed_a = try tomlParseKeyMap(a, content_a);
+    defer parsed_a.deinit(a);
+    var parsed_b = try tomlParseKeyMap(a, content_b);
+    defer parsed_b.deinit(a);
+
+    return diffKeyMaps(a, parsed_a.keys, parsed_b.keys);
+}
+
+fn diffKeyMaps(a: std.mem.Allocator, map_a: KeyMap, map_b: KeyMap) ![]DiffEntry {
+    var entries = std.array_list.Managed(DiffEntry).init(a);
+    errdefer {
+        for (entries.items) |e| freeDiffEntry(a, e);
+        entries.deinit();
+    }
+
+    // Collect all keys from both maps.
+    var all_keys = std.StringHashMap(void).init(a);
+    defer all_keys.deinit();
+
+    {
+        var it = map_a.map.iterator();
+        while (it.next()) |e| try all_keys.put(e.key_ptr.*, {});
+    }
+    {
+        var it = map_b.map.iterator();
+        while (it.next()) |e| try all_keys.put(e.key_ptr.*, {});
+    }
+
+    // Sort keys for deterministic output.
+    var sorted = std.array_list.Managed([]const u8).init(a);
+    defer sorted.deinit();
+    {
+        var it = all_keys.keyIterator();
+        while (it.next()) |kp| try sorted.append(kp.*);
+    }
+    std.sort.block([]const u8, sorted.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+
+    for (sorted.items) |key| {
+        const in_a = map_a.map.get(key);
+        const in_b = map_b.map.get(key);
+
+        if (in_a != null and in_b != null) {
+            const sa = try valueToString(a, in_a.?);
+            defer a.free(sa);
+            const sb = try valueToString(a, in_b.?);
+            defer a.free(sb);
+            if (!std.mem.eql(u8, sa, sb)) {
+                try entries.append(.{
+                    .key = try a.dupe(u8, key),
+                    .kind = .changed,
+                    .old_value = try a.dupe(u8, sa),
+                    .new_value = try a.dupe(u8, sb),
+                });
+            }
+        } else if (in_a != null and in_b == null) {
+            const sa = try valueToString(a, in_a.?);
+            try entries.append(.{
+                .key = try a.dupe(u8, key),
+                .kind = .removed,
+                .old_value = sa,
+                .new_value = try a.dupe(u8, ""),
+            });
+        } else if (in_a == null and in_b != null) {
+            const sb = try valueToString(a, in_b.?);
+            try entries.append(.{
+                .key = try a.dupe(u8, key),
+                .kind = .added,
+                .old_value = try a.dupe(u8, ""),
+                .new_value = sb,
+            });
+        }
+    }
+
+    return try entries.toOwnedSlice();
+}
+
+fn valueToString(a: std.mem.Allocator, v: Value) ![]u8 {
+    return switch (v) {
+        .string => |s| try std.fmt.allocPrint(a, "\"{s}\"", .{s}),
+        .boolean => |b| try a.dupe(u8, if (b) "true" else "false"),
+        .integer => |i| try std.fmt.allocPrint(a, "{d}", .{i}),
+        .float => |f| try std.fmt.allocPrint(a, "{d}", .{f}),
+        .array => |arr| blk: {
+            var aw: std.Io.Writer.Allocating = .init(a);
+            errdefer aw.deinit();
+            try aw.writer.writeByte('[');
+            for (arr, 0..) |item, idx| {
+                if (idx != 0) try aw.writer.writeAll(", ");
+                const s = try valueToString(a, item);
+                defer a.free(s);
+                try aw.writer.writeAll(s);
+            }
+            try aw.writer.writeByte(']');
+            break :blk try aw.toOwnedSlice();
+        },
+    };
+}
+
+pub fn freeDiffEntries(a: std.mem.Allocator, entries: []DiffEntry) void {
+    for (entries) |e| freeDiffEntry(a, e);
+    if (entries.len > 0) a.free(entries);
+}
+
+fn freeDiffEntry(a: std.mem.Allocator, e: DiffEntry) void {
+    a.free(e.key);
+    a.free(e.old_value);
+    a.free(e.new_value);
+}
+
+// --------------------------------
+// JSON Schema generation
+// --------------------------------
+
+/// Generate a JSON Schema matching the zigclaw.toml file structure.
+/// The schema reflects the TOML key hierarchy (e.g. [providers.primary])
+/// rather than the Zig struct layout, enabling editor autocompletion
+/// via Even Better TOML + schema association.
+pub fn jsonSchemaAlloc(a: std.mem.Allocator) []u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    const w = &aw.writer;
+    schemaWriteTomlLayout(w);
+    return aw.toOwnedSlice() catch @panic("OOM generating config schema");
+}
+
+fn schemaWriteTomlLayout(w: anytype) void {
+    w.writeAll(
+        \\{
+        \\  "$schema": "https://json-schema.org/draft/2020-12/schema",
+        \\  "title": "ZigClaw Configuration",
+        \\  "description": "Schema for zigclaw.toml configuration file",
+        \\  "type": "object",
+        \\  "properties": {
+        \\    "config_version": {"type": "integer", "minimum": 1},
+        \\    "vault_path": {"type": "string"},
+        \\    "capabilities": {
+        \\      "type": "object",
+        \\      "properties": {
+        \\        "active_preset": {"type": "string"},
+        \\        "presets": {
+        \\          "type": "object",
+        \\          "additionalProperties": {
+        \\            "type": "object",
+        \\            "properties": {
+        \\              "tools": {"type": "array", "items": {"type": "string"}},
+        \\              "allow_network": {"type": "boolean"},
+        \\              "allow_write_paths": {"type": "array", "items": {"type": "string"}}
+        \\            },
+        \\            "additionalProperties": false
+        \\          }
+        \\        }
+        \\      }
+        \\    },
+        \\    "orchestration": {
+        \\      "type": "object",
+        \\      "properties": {
+        \\        "leader_agent": {"type": "string"}
+        \\      }
+        \\    },
+        \\    "agents": {
+        \\      "type": "object",
+        \\      "additionalProperties": {
+        \\        "type": "object",
+        \\        "properties": {
+        \\          "capability_preset": {"type": "string"},
+        \\          "delegate_to": {"type": "array", "items": {"type": "string"}},
+        \\          "system_prompt": {"type": "string"},
+        \\          "provider": {"type": "string"},
+        \\          "provider_model": {"type": "string"},
+        \\          "provider_temperature": {"type": "number"},
+        \\          "provider_base_url": {"type": "string"},
+        \\          "provider_api_key_env": {"type": "string"}
+        \\        },
+        \\        "additionalProperties": false
+        \\      }
+        \\    },
+        \\    "observability":
+    ) catch return;
+    schemaWriteStructType(w, ObservabilityConfig, 3);
+    w.writeAll(
+        \\,
+        \\    "logging":
+    ) catch return;
+    schemaWriteStructType(w, LoggingConfig, 3);
+    w.writeAll(
+        \\,
+        \\    "attestation":
+    ) catch return;
+    schemaWriteStructType(w, AttestationConfig, 3);
+    w.writeAll(
+        \\,
+        \\    "replay":
+    ) catch return;
+    schemaWriteStructType(w, ReplayConfig, 3);
+    w.writeAll(
+        \\,
+        \\    "gateway":
+    ) catch return;
+    schemaWriteStructType(w, GatewayConfig, 3);
+    w.writeAll(
+        \\,
+        \\    "security":
+    ) catch return;
+    schemaWriteStructType(w, SecurityConfig, 3);
+    w.writeAll(
+        \\,
+        \\    "providers": {
+        \\      "type": "object",
+        \\      "properties": {
+        \\        "primary":
+    ) catch return;
+    schemaWriteStructType(w, ProviderConfig, 5);
+    w.writeAll(
+        \\,
+        \\        "fixtures":
+    ) catch return;
+    schemaWriteStructType(w, ProviderFixturesConfig, 5);
+    w.writeAll(
+        \\,
+        \\        "reliable":
+    ) catch return;
+    schemaWriteStructType(w, ProviderReliableConfig, 5);
+    w.writeAll(
+        \\
+        \\      },
+        \\      "additionalProperties":
+    ) catch return;
+    schemaWriteStructType(w, NamedProviderConfig, 4);
+    w.writeAll(
+        \\
+        \\    },
+        \\    "memory": {
+        \\      "type": "object",
+        \\      "properties": {
+        \\        "backend":
+    ) catch return;
+    schemaWriteEnumType(w, MemoryBackend);
+    w.writeAll(
+        \\,
+        \\        "root": {"type": "string"},
+        \\        "primitives":
+    ) catch return;
+    schemaWriteStructType(w, MemoryPrimitivesConfig, 5);
+    w.writeAll(
+        \\
+        \\      }
+        \\    },
+        \\    "tools": {
+        \\      "type": "object",
+        \\      "properties": {
+        \\        "wasmtime_path": {"type": "string"},
+        \\        "plugin_dir": {"type": "string"},
+        \\        "registry": {
+        \\          "type": "object",
+        \\          "properties": {
+        \\            "strict": {"type": "boolean"}
+        \\          }
+        \\        }
+        \\      }
+        \\    },
+        \\    "queue":
+    ) catch return;
+    schemaWriteStructType(w, QueueConfig, 3);
+    w.writeAll(
+        \\,
+        \\    "automation":
+    ) catch return;
+    schemaWriteStructType(w, AutomationConfig, 3);
+    w.writeAll(
+        \\,
+        \\    "persistence": {
+        \\      "type": "object",
+        \\      "properties": {
+        \\        "git":
+    ) catch return;
+    schemaWriteStructType(w, PersistenceGitConfig, 5);
+    w.writeAll(
+        \\
+        \\      }
+        \\    }
+        \\  },
+        \\  "additionalProperties": false
+        \\}
+    ) catch return;
+}
+
+fn schemaWriteStructType(w: anytype, comptime T: type, comptime indent: usize) void {
+    const fields = @typeInfo(T).@"struct".fields;
+    w.writeAll(" {\n") catch return;
+    schemaIndent(w, indent);
+    w.writeAll("\"type\": \"object\",\n") catch return;
+    schemaIndent(w, indent);
+    w.writeAll("\"properties\": {\n") catch return;
+    inline for (fields, 0..) |field, idx| {
+        // Skip fields not relevant to TOML (e.g. 'name' in NamedProviderConfig is the table key)
+        if (comptime std.mem.eql(u8, field.name, "name") and T == NamedProviderConfig) continue;
+        schemaIndent(w, indent + 1);
+        w.print("\"{s}\": ", .{field.name}) catch return;
+        schemaWriteFieldType(w, field.type);
+        if (idx < fields.len - 1) {
+            w.writeAll(",\n") catch return;
+        } else {
+            w.writeAll("\n") catch return;
+        }
+    }
+    schemaIndent(w, indent);
+    w.writeAll("},\n") catch return;
+    schemaIndent(w, indent);
+    w.writeAll("\"additionalProperties\": false\n") catch return;
+    schemaIndent(w, indent - 1);
+    w.writeAll("}") catch return;
+}
+
+fn schemaWriteFieldType(w: anytype, comptime T: type) void {
+    const info = @typeInfo(T);
+    switch (info) {
+        .bool => w.writeAll("{\"type\": \"boolean\"}") catch return,
+        .int => |i| {
+            if (i.signedness == .signed) {
+                w.writeAll("{\"type\": \"integer\"}") catch return;
+            } else {
+                w.print("{{\"type\": \"integer\", \"minimum\": 0}}", .{}) catch return;
+            }
+        },
+        .float => w.writeAll("{\"type\": \"number\"}") catch return,
+        .@"enum" => schemaWriteEnumType(w, T),
+        .pointer => |p| {
+            if (p.size == .slice) {
+                if (p.child == u8) {
+                    w.writeAll("{\"type\": \"string\"}") catch return;
+                } else {
+                    w.writeAll("{\"type\": \"array\", \"items\": {\"type\": \"string\"}}") catch return;
+                }
+            } else {
+                w.writeAll("{}") catch return;
+            }
+        },
+        .optional => |o| schemaWriteFieldType(w, o.child),
+        else => w.writeAll("{}") catch return,
+    }
+}
+
+fn schemaWriteEnumType(w: anytype, comptime T: type) void {
+    const fields = @typeInfo(T).@"enum".fields;
+    w.writeAll("{\"type\": \"string\", \"enum\": [") catch return;
+    inline for (fields, 0..) |field, idx| {
+        w.print("\"{s}\"", .{field.name}) catch return;
+        if (idx < fields.len - 1) w.writeAll(", ") catch return;
+    }
+    w.writeAll("]}") catch return;
+}
+
+fn schemaIndent(w: anytype, comptime n: usize) void {
+    inline for (0..n) |_| {
+        w.writeAll("  ") catch return;
+    }
+}
+
+/// Write an inline comment for a key, if one was captured from the original file.
+/// Emits " # <comment text>" (no trailing newline).
+fn writeInlineComment(w: *std.Io.Writer, cm: CommentMap, key: []const u8) std.Io.Writer.Error!void {
+    const comment = cm.getInline(key) orelse return;
+    if (comment.len > 0) {
+        try w.writeAll(" # ");
+        try w.writeAll(comment);
+    }
+}
+
+/// Write block comment lines for a section header, if any were captured.
+/// Uses the "@section.path" convention from the parser for section-level comments.
+fn writeSectionComment(w: *std.Io.Writer, cm: CommentMap, section: []const u8) std.Io.Writer.Error!void {
+    // Build the lookup key with @ prefix.
+    var key_buf: [128]u8 = undefined;
+    if (section.len + 1 > key_buf.len) return;
+    key_buf[0] = '@';
+    @memcpy(key_buf[1..][0..section.len], section);
+    const lookup = key_buf[0 .. section.len + 1];
+
+    const comment = cm.block_comments.get(lookup) orelse return;
+    // Emit each line as a TOML comment.
+    var comment_lines = std.mem.splitScalar(u8, comment, '\n');
+    while (comment_lines.next()) |cline| {
+        try w.writeAll("# ");
+        try w.writeAll(cline);
+        try w.writeAll("\n");
+    }
 }
 
 fn writeTomlString(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {

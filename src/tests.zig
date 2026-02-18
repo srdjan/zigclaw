@@ -3337,3 +3337,165 @@ test "vault save and reopen from file" {
         try std.testing.expectEqualStrings("hunter2", db_pass);
     }
 }
+
+test "config unknown key suggests closest match" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    // Write a config with a typo
+    const cfg_path = "/tmp/zigclaw-test-typo.toml";
+    const content =
+        \\config_version = 1
+        \\
+        \\[providers.primary]
+        \\knd = "openai_compat"
+        \\modl = "gpt-4.1"
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = content });
+
+    var vc = try config.loadAndValidate(a, io, cfg_path);
+    defer vc.deinit(a);
+
+    // Should have warnings with "did you mean" suggestions (full key paths)
+    var found_kind_suggestion = false;
+    var found_model_suggestion = false;
+    for (vc.warnings) |w| {
+        if (std.mem.indexOf(u8, w.message, "did you mean 'providers.primary.kind'") != null) found_kind_suggestion = true;
+        if (std.mem.indexOf(u8, w.message, "did you mean 'providers.primary.model'") != null) found_model_suggestion = true;
+    }
+    try std.testing.expect(found_kind_suggestion);
+    try std.testing.expect(found_model_suggestion);
+}
+
+test "config preserves inline comments through round-trip" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const cfg_path = "/tmp/zigclaw-test-comments.toml";
+    const content =
+        \\config_version = 1
+        \\
+        \\[providers.primary]
+        \\kind = "stub" # for testing only
+        \\model = "stub"
+        \\temperature = 0.5
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = content });
+
+    var vc = try config.loadAndValidate(a, io, cfg_path);
+    defer vc.deinit(a);
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    try vc.printNormalizedToml(a, &aw.writer);
+    const out = try aw.toOwnedSlice();
+    defer a.free(out);
+
+    // The inline comment should be preserved
+    try std.testing.expect(std.mem.indexOf(u8, out, "# for testing only") != null);
+}
+
+test "config semantic diff detects changes" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const path_a = "/tmp/zigclaw-test-diff-a.toml";
+    const path_b = "/tmp/zigclaw-test-diff-b.toml";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path_a, .data =
+        \\config_version = 1
+        \\[providers.primary]
+        \\kind = "stub"
+        \\model = "gpt-4.1-mini"
+        \\temperature = 0.2
+        \\
+    });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path_b, .data =
+        \\config_version = 1
+        \\[providers.primary]
+        \\kind = "openai_compat"
+        \\model = "gpt-4.1"
+        \\temperature = 0.3
+        \\
+    });
+
+    const entries = try config.semanticDiff(a, io, path_a, path_b);
+    defer config.freeDiffEntries(a, entries);
+
+    // Should detect 3 changes: kind, model, temperature
+    try std.testing.expectEqual(@as(usize, 3), entries.len);
+
+    var found_kind = false;
+    var found_model = false;
+    var found_temp = false;
+    for (entries) |e| {
+        if (std.mem.eql(u8, e.key, "providers.primary.kind")) {
+            try std.testing.expectEqualStrings("\"stub\"", e.old_value);
+            try std.testing.expectEqualStrings("\"openai_compat\"", e.new_value);
+            found_kind = true;
+        }
+        if (std.mem.eql(u8, e.key, "providers.primary.model")) found_model = true;
+        if (std.mem.eql(u8, e.key, "providers.primary.temperature")) found_temp = true;
+    }
+    try std.testing.expect(found_kind);
+    try std.testing.expect(found_model);
+    try std.testing.expect(found_temp);
+}
+
+test "config JSON schema is valid JSON with expected structure" {
+    const a = std.testing.allocator;
+    const schema = config.jsonSchemaAlloc(a);
+    defer a.free(schema);
+
+    // Verify it's valid JSON by parsing it
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, schema, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    const schema_field = root.get("$schema") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings(
+        "https://json-schema.org/draft/2020-12/schema",
+        schema_field.string,
+    );
+
+    const title = root.get("title") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("ZigClaw Configuration", title.string);
+
+    const props = root.get("properties") orelse return error.TestFailed;
+    try std.testing.expect(props.object.get("providers") != null);
+    try std.testing.expect(props.object.get("capabilities") != null);
+    try std.testing.expect(props.object.get("memory") != null);
+
+    // Check that providers.primary exists with enum kind
+    const providers_prop = props.object.get("providers").?.object;
+    const primary = providers_prop.get("properties").?.object.get("primary").?.object;
+    const kind_prop = primary.get("properties").?.object.get("kind").?.object;
+    const enum_values = kind_prop.get("enum").?.array;
+    try std.testing.expectEqual(@as(usize, 2), enum_values.items.len);
+}
+
+test "levenshtein distance basic cases" {
+    const str_util = @import("util/str.zig");
+    try std.testing.expectEqual(@as(usize, 0), str_util.levenshtein("abc", "abc"));
+    try std.testing.expectEqual(@as(usize, 1), str_util.levenshtein("abc", "abd"));
+    try std.testing.expectEqual(@as(usize, 1), str_util.levenshtein("abc", "ab"));
+    try std.testing.expectEqual(@as(usize, 3), str_util.levenshtein("abc", "xyz"));
+    try std.testing.expectEqual(@as(usize, 3), str_util.levenshtein("", "abc"));
+    try std.testing.expectEqual(@as(usize, 0), str_util.levenshtein("", ""));
+}

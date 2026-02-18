@@ -23,47 +23,71 @@ ZigClaw is a local-first Zig agent runtime with:
   - `zigclaw update` manifest/binary fetch
   - `http_fetch` native plugin
 
+## Install
+
+Clone the repo and run the install script:
+
+```sh
+git clone https://github.com/yourorg/zigclaw
+cd zigclaw
+./install.sh
+```
+
+The script builds everything with `ReleaseSafe`, installs the binary and all plugins to `~/.local/share/zigclaw/`, creates a default config at `~/.config/zigclaw/zigclaw.toml`, and places a wrapper at `~/.local/bin/zigclaw`.
+
+Make sure `~/.local/bin` is in your `PATH`:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"   # add to ~/.zshrc or ~/.bashrc
+```
+
+After that, `zigclaw` is available from any directory without any project-level setup.
+
+**Config auto-selection:** the wrapper uses `~/.config/zigclaw/zigclaw.toml` by default. If a `zigclaw.toml` exists in the current directory, or you pass `--config`, that takes precedence instead.
+
 ## Quickstart
 
-Build core binary:
+Generate starter config in the current directory (skips if `zigclaw.toml` already exists):
 ```sh
-zig build
-```
-
-Build/install plugins and manifests to `zig-out/bin`:
-```sh
-zig build plugins
-```
-
-Generate starter config (skips if `zigclaw.toml` already exists):
-```sh
-zig-out/bin/zigclaw init
+zigclaw init
 ```
 
 Zero-config quick start (auto-detects `OPENAI_API_KEY`):
 ```sh
 export OPENAI_API_KEY=sk-...
-zig-out/bin/zigclaw chat
+zigclaw chat
 ```
 
 One-shot query:
 ```sh
-zig-out/bin/zigclaw chat "Summarize README.md"
+zigclaw chat "Summarize README.md"
 ```
 
 Stdin pipe:
 ```sh
-echo "What does this file do?" | zig-out/bin/zigclaw chat
+echo "What does this file do?" | zigclaw chat
 ```
 
 Override model or preset at runtime:
 ```sh
-zig-out/bin/zigclaw chat --model gpt-4.1 --preset dev "Write a test"
+zigclaw chat --model gpt-4.1 --preset dev "Write a test"
 ```
 
 Run with local deterministic provider (no network):
 ```sh
-zig-out/bin/zigclaw agent --message "hello" --config zigclaw.toml
+zigclaw agent --message "hello" --config zigclaw.toml
+```
+
+## Building from Source
+
+Build core binary only:
+```sh
+zig build
+```
+
+Build and install plugins and manifests to `zig-out/bin`:
+```sh
+zig build plugins
 ```
 
 ## CLI Commands
@@ -129,7 +153,7 @@ zigclaw completion zsh|bash|fish
 
 Validate and print normalized config:
 ```sh
-zig-out/bin/zigclaw config validate --config zigclaw.toml --format toml
+zigclaw config validate --config zigclaw.toml --format toml
 ```
 
 Normalized output is stable and omits `providers.primary.api_key`. Inline comments from the original file are preserved through the round-trip (e.g. `kind = "openai_compat" # "stub" | "openai_compat"`).
@@ -138,13 +162,13 @@ Unknown keys produce warnings with "did you mean?" suggestions when a close matc
 
 Semantic diff between two config files:
 ```sh
-zig-out/bin/zigclaw config diff --a zigclaw.toml --b zigclaw-prod.toml
-zig-out/bin/zigclaw config diff --a zigclaw.toml --b zigclaw-prod.toml --json
+zigclaw config diff --a zigclaw.toml --b zigclaw-prod.toml
+zigclaw config diff --a zigclaw.toml --b zigclaw-prod.toml --json
 ```
 
 Generate a JSON Schema describing all config fields (for editor autocompletion via Even Better TOML or similar):
 ```sh
-zig-out/bin/zigclaw config schema > zigclaw-schema.json
+zigclaw config schema > zigclaw-schema.json
 ```
 
 Canonical normalized example (matches `tests/golden/config_normalized.toml`):
@@ -255,14 +279,14 @@ remote_name = "origin"
 
 Policy hash:
 ```sh
-zig-out/bin/zigclaw policy hash --config zigclaw.toml
+zigclaw policy hash --config zigclaw.toml
 ```
 
 Policy explanations:
 ```sh
-zig-out/bin/zigclaw policy explain --tool fs_read --config zigclaw.toml
-zig-out/bin/zigclaw policy explain --mount ./tmp/work --config zigclaw.toml
-zig-out/bin/zigclaw policy explain --command "wasmtime run --mapdir /workspace::/workspace plugin.wasm" --config zigclaw.toml
+zigclaw policy explain --tool fs_read --config zigclaw.toml
+zigclaw policy explain --mount ./tmp/work --config zigclaw.toml
+zigclaw policy explain --command "wasmtime run --mapdir /workspace::/workspace plugin.wasm" --config zigclaw.toml
 ```
 
 `policy explain --command` uses an allowlist over command bytes (`a-zA-Z0-9`, `.`, `_`, `/`, `-`, space, `:`, `=`, `,`).
@@ -271,13 +295,13 @@ zig-out/bin/zigclaw policy explain --command "wasmtime run --mapdir /workspace::
 
 List and describe installed tool manifests:
 ```sh
-zig-out/bin/zigclaw tools list --config zigclaw.toml
-zig-out/bin/zigclaw tools describe echo --config zigclaw.toml
+zigclaw tools list --config zigclaw.toml
+zigclaw tools describe echo --config zigclaw.toml
 ```
 
 Run a tool with JSON args:
 ```sh
-zig-out/bin/zigclaw tools run echo --args '{"text":"hi"}' --config zigclaw.toml
+zigclaw tools run echo --args '{"text":"hi"}' --config zigclaw.toml
 ```
 
 Execution model:
@@ -288,9 +312,9 @@ Execution model:
 
 Prompt bundle dump/diff:
 ```sh
-zig-out/bin/zigclaw prompt dump --message "hello" --format json --config zigclaw.toml
-zig-out/bin/zigclaw prompt dump --message "hello" --format text --out /tmp/prompt.txt --config zigclaw.toml
-zig-out/bin/zigclaw prompt diff --a /tmp/prompt_a.txt --b /tmp/prompt_b.txt
+zigclaw prompt dump --message "hello" --format json --config zigclaw.toml
+zigclaw prompt dump --message "hello" --format text --out /tmp/prompt.txt --config zigclaw.toml
+zigclaw prompt diff --a /tmp/prompt_a.txt --b /tmp/prompt_b.txt
 ```
 
 The `chat` command is the primary user-facing entry point. It supports an interactive session, a one-shot positional argument (`zigclaw chat "message"`), a `--message` flag, and stdin piping. Interactive mode retains conversation history across turns (up to 20 user/assistant pairs), displays the active model in the prompt (`[gpt-4.1-mini] > `), prints token counts after each response, and supports slash commands: `/help`, `/model`, `/turns`, `/clear`.
@@ -356,52 +380,52 @@ Per-agent provider resolution priority: `[providers.primary]` (default) < named 
 
 Unified onboarding flows:
 ```sh
-zig-out/bin/zigclaw init
-zig-out/bin/zigclaw init --guided
-zig-out/bin/zigclaw setup
+zigclaw init
+zigclaw init --guided
+zigclaw setup
 ```
 `init` now runs scaffold + post-setup checks (`zigclaw doctor`). `setup` runs the guided wizard path and offers optional plugin build.
 
 Encrypted vault secret management:
 ```sh
-zig-out/bin/zigclaw vault set openai_api_key --vault ./.zigclaw/vault.enc
-zig-out/bin/zigclaw vault get openai_api_key --vault ./.zigclaw/vault.enc
-zig-out/bin/zigclaw vault list --vault ./.zigclaw/vault.enc
-zig-out/bin/zigclaw vault delete openai_api_key --vault ./.zigclaw/vault.enc
+zigclaw vault set openai_api_key --vault ./.zigclaw/vault.enc
+zigclaw vault get openai_api_key --vault ./.zigclaw/vault.enc
+zigclaw vault list --vault ./.zigclaw/vault.enc
+zigclaw vault delete openai_api_key --vault ./.zigclaw/vault.enc
 ```
 
 Audit/reporting and receipt verification:
 ```sh
-zig-out/bin/zigclaw audit report --request-id req_demo_1 --format text --config zigclaw.toml
-zig-out/bin/zigclaw audit verify --request-id req_demo_1 --format json --config zigclaw.toml
-zig-out/bin/zigclaw attest req_demo_1 --config zigclaw.toml
-zig-out/bin/zigclaw attest verify --request-id req_demo_1 --event-index 0 --config zigclaw.toml
+zigclaw audit report --request-id req_demo_1 --format text --config zigclaw.toml
+zigclaw audit verify --request-id req_demo_1 --format json --config zigclaw.toml
+zigclaw attest req_demo_1 --config zigclaw.toml
+zigclaw attest verify --request-id req_demo_1 --event-index 0 --config zigclaw.toml
 ```
 
 Replay capture/run/diff:
 ```sh
-zig-out/bin/zigclaw replay capture --request-id req_demo_1 --config zigclaw.toml
-zig-out/bin/zigclaw replay run --capsule ./.zigclaw/capsules/req_demo_1.json --config zigclaw.toml
-zig-out/bin/zigclaw replay diff --a capsule_a.json --b capsule_b.json
+zigclaw replay capture --request-id req_demo_1 --config zigclaw.toml
+zigclaw replay run --capsule ./.zigclaw/capsules/req_demo_1.json --config zigclaw.toml
+zigclaw replay diff --a capsule_a.json --b capsule_b.json
 ```
 
 Self-update:
 ```sh
-zig-out/bin/zigclaw update --check
-zig-out/bin/zigclaw update
+zigclaw update --check
+zigclaw update
 ```
 
 Doctor diagnostics:
 ```sh
-zig-out/bin/zigclaw doctor --config zigclaw.toml
-zig-out/bin/zigclaw doctor --config zigclaw.toml --json
+zigclaw doctor --config zigclaw.toml
+zigclaw doctor --config zigclaw.toml --json
 ```
 
 Shell completions:
 ```sh
-zig-out/bin/zigclaw completion zsh > ~/.zfunc/_zigclaw
-zig-out/bin/zigclaw completion bash > /etc/bash_completion.d/zigclaw
-zig-out/bin/zigclaw completion fish > ~/.config/fish/completions/zigclaw.fish
+zigclaw completion zsh > ~/.zfunc/_zigclaw
+zigclaw completion bash > /etc/bash_completion.d/zigclaw
+zigclaw completion fish > ~/.config/fish/completions/zigclaw.fish
 ```
 
 Most commands now support `--json` for machine-readable output (for example: `version`, `doctor`, `update`, `run summary`, `vault`, `init`, non-interactive `agent`, `prompt diff`, `config validate`, `policy hash`, and `queue watch`).
@@ -410,50 +434,50 @@ Most commands now support `--json` for machine-readable output (for example: `ve
 
 Enqueue/run/status/cancel/metrics:
 ```sh
-zig-out/bin/zigclaw queue enqueue-agent --message "summarize status" --request-id req_demo_1 --config zigclaw.toml
-zig-out/bin/zigclaw queue worker --once --config zigclaw.toml
-zig-out/bin/zigclaw queue status --request-id req_demo_1 --config zigclaw.toml
-zig-out/bin/zigclaw queue watch --request-id req_demo_1 --poll-ms 500 --config zigclaw.toml
-zig-out/bin/zigclaw queue cancel --request-id req_demo_1 --config zigclaw.toml
-zig-out/bin/zigclaw queue metrics --config zigclaw.toml
-zig-out/bin/zigclaw run summary --request-id req_demo_1 --config zigclaw.toml
+zigclaw queue enqueue-agent --message "summarize status" --request-id req_demo_1 --config zigclaw.toml
+zigclaw queue worker --once --config zigclaw.toml
+zigclaw queue status --request-id req_demo_1 --config zigclaw.toml
+zigclaw queue watch --request-id req_demo_1 --poll-ms 500 --config zigclaw.toml
+zigclaw queue cancel --request-id req_demo_1 --config zigclaw.toml
+zigclaw queue metrics --config zigclaw.toml
+zigclaw run summary --request-id req_demo_1 --config zigclaw.toml
 ```
 
 Queue states: `queued`, `processing`, `completed`, `canceled`, `not_found`.
 
 Lightweight ops dashboard:
 ```sh
-zig-out/bin/zigclaw ops summary --config zigclaw.toml
-zig-out/bin/zigclaw ops watch --poll-ms 1000 --config zigclaw.toml
+zigclaw ops summary --config zigclaw.toml
+zigclaw ops watch --poll-ms 1000 --config zigclaw.toml
 ```
 
 ## Primitives and Git Persistence
 
 Create/list/complete primitive tasks:
 ```sh
-zig-out/bin/zigclaw task add "Reply to client about shipping delay" --priority high --owner clawdious --project ops --tags "client,email" --config zigclaw.toml
-zig-out/bin/zigclaw task list --status open --format text --config zigclaw.toml
-zig-out/bin/zigclaw task done reply-to-client-about-shipping-delay --reason "Sent tracking and ETA" --config zigclaw.toml
+zigclaw task add "Reply to client about shipping delay" --priority high --owner clawdious --project ops --tags "client,email" --config zigclaw.toml
+zigclaw task list --status open --format text --config zigclaw.toml
+zigclaw task done reply-to-client-about-shipping-delay --reason "Sent tracking and ETA" --config zigclaw.toml
 ```
 
 Validate a primitive and inspect task template schema:
 ```sh
-zig-out/bin/zigclaw primitive validate reply-to-client-about-shipping-delay --config zigclaw.toml
-zig-out/bin/zigclaw templates show task --config zigclaw.toml
+zigclaw primitive validate reply-to-client-about-shipping-delay --config zigclaw.toml
+zigclaw templates show task --config zigclaw.toml
 ```
 
 Git-backed persistence workflow:
 ```sh
-zig-out/bin/zigclaw git init --branch main --config zigclaw.toml
-zig-out/bin/zigclaw git status --config zigclaw.toml
-zig-out/bin/zigclaw git sync --message "sync primitive memory updates" --config zigclaw.toml
+zigclaw git init --branch main --config zigclaw.toml
+zigclaw git status --config zigclaw.toml
+zigclaw git sync --message "sync primitive memory updates" --config zigclaw.toml
 ```
 
 ## Gateway
 
 Start local gateway:
 ```sh
-zig-out/bin/zigclaw gateway start --bind 127.0.0.1 --port 8787 --config zigclaw.toml
+zigclaw gateway start --bind 127.0.0.1 --port 8787 --config zigclaw.toml
 ```
 
 On startup, gateway prints bearer token, an Ops UI URL, and token file path (`<workspace_root>/.zigclaw/gateway.token`).

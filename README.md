@@ -4,7 +4,7 @@ ZigClaw is a local-first Zig agent runtime with:
 - `zigclaw chat` as the primary entry point: interactive session, one-shot, or stdin pipe; multi-turn context retained across turns
 - config-driven capability presets and compiled policy hash
 - tool execution via plugin manifests (WASI plugins and native plugins)
-- provider abstraction (`stub`, `openai_compat`) with fixture and retry wrappers; zero-config auto-detection when `OPENAI_API_KEY` is present
+- provider abstraction (`stub`, `openai_compat`) with fixture and retry wrappers; zero-config auto-detection when `OPENAI_API_KEY` is present; named providers for per-agent multi-model orchestration
 - setup wizard, encrypted vault secrets, and in-place self-update command
 - queue worker mode and local HTTP gateway
 - JSONL observability + decision/audit logs
@@ -280,7 +280,7 @@ zig-out/bin/zigclaw prompt diff --a /tmp/prompt_a.txt --b /tmp/prompt_b.txt
 
 The `chat` command is the primary user-facing entry point. It supports an interactive session, a one-shot positional argument (`zigclaw chat "message"`), a `--message` flag, and stdin piping. Interactive mode retains conversation history across turns (up to 20 user/assistant pairs), displays the active model in the prompt (`[gpt-4.1-mini] > `), prints token counts after each response, and supports slash commands: `/help`, `/model`, `/turns`, `/clear`.
 
-`agent` supports `--interactive` for the same REPL experience and `--message` for one-shot use. Agent orchestration supports optional static profiles (`[orchestration]`, `[agents.<id>]`) and a built-in `delegate_agent` tool when `delegate_to` is configured.
+`agent` supports `--interactive` for the same REPL experience and `--message` for one-shot use. Agent orchestration supports optional static profiles (`[orchestration]`, `[agents.<id>]`) with per-agent provider selection (named providers or inline overrides) and a built-in `delegate_agent` tool when `delegate_to` is configured.
 Delegated child runs are attenuated with capability tokens (tool/write-path/network narrowing + optional turn/expiry constraints).
 
 ## Providers
@@ -316,6 +316,26 @@ backoff_ms = 250
 ```
 
 `openai_compat` API key resolution order is: `providers.primary.api_key` -> vault key `providers.primary.api_key_vault` -> env var `providers.primary.api_key_env`.
+
+Named providers for multi-model orchestration:
+```toml
+[providers.capable]
+kind = "openai_compat"
+model = "gpt-4.1"
+temperature = 0.3
+api_key_env = "OPENAI_API_KEY"
+
+[agents.writer]
+capability_preset = "dev"
+delegate_to = []
+system_prompt = "Implement delegated tasks."
+provider = "capable"              # use named provider
+# or inline overrides:
+# provider_model = "gpt-4.1"
+# provider_temperature = 0.8
+```
+
+Per-agent provider resolution priority: `[providers.primary]` (default) < named provider (`provider = "NAME"`) < inline agent fields (`provider_model`, `provider_temperature`, `provider_base_url`, `provider_api_key_env`). See `docs/agent-guide.md` section 3 for full details.
 
 ## Setup, Vault, Audit, Attestation, Replay, Update
 

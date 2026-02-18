@@ -363,10 +363,42 @@ test "config parses static multi-agent orchestration" {
             try std.testing.expectEqualStrings("dev", ag.capability_preset);
             try std.testing.expectEqual(@as(usize, 0), ag.delegate_to.len);
             try std.testing.expect(std.mem.indexOf(u8, ag.system_prompt, "delegated") != null);
+            // Named provider reference
+            try std.testing.expectEqualStrings("capable", ag.provider);
         }
     }
     try std.testing.expect(planner_ok);
     try std.testing.expect(writer_ok);
+
+    // Named provider pool
+    try std.testing.expectEqual(@as(usize, 1), vc.raw.provider_named.len);
+    try std.testing.expectEqualStrings("capable", vc.raw.provider_named[0].name);
+    try std.testing.expectEqualStrings("gpt-4.1", vc.raw.provider_named[0].model);
+    try std.testing.expectEqual(config.ProviderKind.openai_compat, vc.raw.provider_named[0].kind);
+}
+
+test "config parses inline agent provider overrides" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "tests/fixtures/multi_agent_inline_override.toml");
+    defer vc.deinit(a);
+
+    try std.testing.expectEqual(@as(usize, 2), vc.raw.orchestration.agents.len);
+    try std.testing.expectEqual(@as(usize, 0), vc.raw.provider_named.len);
+
+    for (vc.raw.orchestration.agents) |ag| {
+        if (std.mem.eql(u8, ag.id, "writer")) {
+            try std.testing.expectEqualStrings("gpt-4.1", ag.provider_model);
+            try std.testing.expectEqual(@as(?f64, 0.8), ag.provider_temperature);
+            try std.testing.expectEqualStrings("", ag.provider);
+        }
+    }
 }
 
 test "config strict registry rejects unregistered preset tool" {

@@ -121,6 +121,36 @@ pub fn run(a: std.mem.Allocator, io: std.Io) !bool {
         });
 
         cfg.orchestration.leader_agent = try a.dupe(u8, "planner");
+
+        // Multi-model: optionally use a different model for the worker agent
+        try ow.interface.writeAll("\n");
+        try ow.flush();
+        const want_diff_model = try prompts.readYesNo(io, "Use a more capable model for the worker agent?", false);
+        if (want_diff_model) {
+            var capable_model_buf: [256]u8 = undefined;
+            const capable_model = try prompts.readLine(io, "Worker model [gpt-4.1]: ", &capable_model_buf);
+            const model_name = if (capable_model.len > 0) capable_model else "gpt-4.1";
+
+            var named_list = std.array_list.Managed(config.NamedProviderConfig).init(a);
+            try named_list.append(.{
+                .name = try a.dupe(u8, "capable"),
+                .kind = .openai_compat,
+                .model = try a.dupe(u8, model_name),
+                .api_key_env = if (cfg.provider_primary.api_key_env.ptr != (config.ProviderConfig{}).api_key_env.ptr)
+                    try a.dupe(u8, cfg.provider_primary.api_key_env)
+                else
+                    @as([]const u8, ""),
+            });
+            cfg.provider_named = try named_list.toOwnedSlice();
+
+            // Set the writer agent's provider to "capable"
+            for (agents_list.items) |*ag| {
+                if (std.mem.eql(u8, ag.id, "writer")) {
+                    ag.provider = try a.dupe(u8, "capable");
+                }
+            }
+        }
+
         cfg.orchestration.agents = try agents_list.toOwnedSlice();
     }
 
@@ -176,6 +206,11 @@ pub fn run(a: std.mem.Allocator, io: std.Io) !bool {
     try ow.interface.writeAll("\nNext steps:\n");
     if (cfg.provider_primary.kind == .openai_compat) {
         try ow.interface.print("  1. Set {s} environment variable\n", .{cfg.provider_primary.api_key_env});
+    }
+    for (cfg.provider_named) |np| {
+        if (np.api_key_env.len > 0 and !std.mem.eql(u8, np.api_key_env, cfg.provider_primary.api_key_env)) {
+            try ow.interface.print("     Also set {s} for provider \"{s}\"\n", .{ np.api_key_env, np.name });
+        }
     }
     try ow.interface.writeAll("  2. Build plugins: zig build plugins\n");
     try ow.interface.writeAll("  3. Run: zigclaw agent --message \"hello\"\n");

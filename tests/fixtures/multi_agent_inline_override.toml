@@ -13,12 +13,6 @@ tools = ["echo", "fs_read"]
 allow_network = true
 allow_write_paths = ["./tmp"]
 
-[providers.capable]
-kind = "openai_compat"
-model = "gpt-4.1"
-temperature = 0.3
-api_key_env = "OPENAI_API_KEY"
-
 [orchestration]
 leader_agent = "planner"
 
@@ -31,4 +25,5 @@ system_prompt = "Plan the work, then delegate."
 capability_preset = "dev"
 delegate_to = []
 system_prompt = "Implement delegated tasks."
-provider = "capable"
+provider_model = "gpt-4.1"
+provider_temperature = 0.8

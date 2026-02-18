@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased] - 2026-02-18
 
 ### Added
+- Multi-model orchestration: per-agent provider selection via named providers (`[providers.NAME]` sections) and inline agent overrides (`provider_model`, `provider_temperature`, `provider_base_url`, `provider_api_key_env`). Resolution priority: `[providers.primary]` < named provider < inline fields.
+- `NamedProviderConfig` struct and `provider_named` field on `Config`.
+- Extended `AgentProfileConfig` with `provider`, `provider_model`, `provider_temperature`, `provider_base_url`, `provider_api_key_env` fields.
+- `cfgForAgent()` now patches `provider_primary` with named/inline overrides before provider factory call.
+- `provider.select` decision log reason now includes `agent=`, `kind=`, `model=` for multi-model tracing.
+- Setup wizard (`zigclaw init --guided`) prompts for a separate worker model and creates a named provider.
+- Config validation warns on unknown named provider references in `agents.*.provider`.
 - `zigclaw chat` command as the primary user-facing entry point:
   - Interactive session, one-shot positional argument (`zigclaw chat "message"`), `--message` flag, and stdin pipe (`echo "msg" | zigclaw chat`).
   - `--model`, `--preset`, `--agent`, `--json`, `--verbose` flags.

@@ -350,7 +350,11 @@ pub fn runLoop(
         .decision = "provider.select",
         .subject = run_cfg.raw.provider_primary.model,
         .allowed = true,
-        .reason = "provider/model selected for run",
+        .reason = try std.fmt.allocPrint(ta, "agent={s} kind={s} model={s}", .{
+            active_agent.id,
+            @tagName(run_cfg.raw.provider_primary.kind),
+            run_cfg.raw.provider_primary.model,
+        }),
         .policy_hash = run_cfg.policy.policyHash(),
     }, ledger_ptr);
 
@@ -1162,6 +1166,16 @@ fn findAgentProfile(raw: config.Config, id: []const u8) ?config.AgentProfileConf
     return null;
 }
 
+fn findNamedProvider(
+    named: []const config.NamedProviderConfig,
+    name: []const u8,
+) ?config.NamedProviderConfig {
+    for (named) |np| {
+        if (std.mem.eql(u8, np.name, name)) return np;
+    }
+    return null;
+}
+
 fn cfgForAgent(
     a: std.mem.Allocator,
     cfg: config.ValidatedConfig,
@@ -1179,6 +1193,28 @@ fn cfgForAgent(
     if (parent_token) |token| {
         out.policy = try policy_mod.Policy.attenuate(a, out.policy, token.*);
     }
+
+    // Provider override: provider_primary < named provider < inline agent fields
+    if (active.profile) |p| {
+        // Named provider base
+        if (p.provider.len > 0) {
+            if (findNamedProvider(out.raw.provider_named, p.provider)) |np| {
+                out.raw.provider_primary.kind = np.kind;
+                if (np.model.len > 0) out.raw.provider_primary.model = np.model;
+                if (np.base_url.len > 0) out.raw.provider_primary.base_url = np.base_url;
+                if (np.api_key.len > 0) out.raw.provider_primary.api_key = np.api_key;
+                if (np.api_key_vault.len > 0) out.raw.provider_primary.api_key_vault = np.api_key_vault;
+                if (np.api_key_env.len > 0) out.raw.provider_primary.api_key_env = np.api_key_env;
+                out.raw.provider_primary.temperature = np.temperature;
+            }
+        }
+        // Inline agent overrides (highest priority)
+        if (p.provider_model.len > 0) out.raw.provider_primary.model = p.provider_model;
+        if (p.provider_temperature) |t| out.raw.provider_primary.temperature = t;
+        if (p.provider_base_url.len > 0) out.raw.provider_primary.base_url = p.provider_base_url;
+        if (p.provider_api_key_env.len > 0) out.raw.provider_primary.api_key_env = p.provider_api_key_env;
+    }
+
     return out;
 }
 

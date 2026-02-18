@@ -16,6 +16,17 @@ pub const ProviderConfig = struct {
     api_key_env: []const u8 = "OPENAI_API_KEY",
 };
 
+pub const NamedProviderConfig = struct {
+    name: []const u8,
+    kind: ProviderKind = .openai_compat,
+    model: []const u8 = "",
+    temperature: f64 = 0.2,
+    base_url: []const u8 = "",
+    api_key: []const u8 = "",
+    api_key_vault: []const u8 = "",
+    api_key_env: []const u8 = "",
+};
+
 pub const FixturesMode = enum { off, record, replay, capsule_replay };
 
 pub const ProviderFixturesConfig = struct {
@@ -151,6 +162,11 @@ pub const AgentProfileConfig = struct {
     capability_preset: []const u8,
     delegate_to: []const []const u8,
     system_prompt: []const u8,
+    provider: []const u8 = "",
+    provider_model: []const u8 = "",
+    provider_temperature: ?f64 = null,
+    provider_base_url: []const u8 = "",
+    provider_api_key_env: []const u8 = "",
 };
 
 pub const OrchestrationConfig = struct {
@@ -169,6 +185,7 @@ pub const Config = struct {
     replay: ReplayConfig = .{},
 
     provider_primary: ProviderConfig = .{},
+    provider_named: []NamedProviderConfig = &.{},
     provider_fixtures: ProviderFixturesConfig = .{},
     provider_reliable: ProviderReliableConfig = .{},
 
@@ -281,6 +298,7 @@ pub const ValidatedConfig = struct {
             sys.orchestration.leader_agent,
             sys.orchestration.agents.len,
         });
+        try w.print("  providers.named.count={d}\n", .{sys.provider_named.len});
         try w.print("  policy.tools_allowed={d} presets={d}\n", .{
             self.policy.allowed_tools_count(),
             self.policy.presets_count(),
@@ -355,6 +373,29 @@ pub const ValidatedConfig = struct {
                 if (ag.system_prompt.len > 0) {
                     try w.writeAll("system_prompt = ");
                     try writeTomlString(w, ag.system_prompt);
+                    try w.writeAll("\n");
+                }
+                if (ag.provider.len > 0) {
+                    try w.writeAll("provider = ");
+                    try writeTomlString(w, ag.provider);
+                    try w.writeAll("\n");
+                }
+                if (ag.provider_model.len > 0) {
+                    try w.writeAll("provider_model = ");
+                    try writeTomlString(w, ag.provider_model);
+                    try w.writeAll("\n");
+                }
+                if (ag.provider_temperature) |t| {
+                    try w.print("provider_temperature = {d}\n", .{t});
+                }
+                if (ag.provider_base_url.len > 0) {
+                    try w.writeAll("provider_base_url = ");
+                    try writeTomlString(w, ag.provider_base_url);
+                    try w.writeAll("\n");
+                }
+                if (ag.provider_api_key_env.len > 0) {
+                    try w.writeAll("provider_api_key_env = ");
+                    try writeTomlString(w, ag.provider_api_key_env);
                     try w.writeAll("\n");
                 }
                 try w.writeAll("\n");
@@ -446,6 +487,50 @@ pub const ValidatedConfig = struct {
         try w.writeAll("[providers.reliable]\n");
         try w.print("retries = {d}\n", .{self.raw.provider_reliable.retries});
         try w.print("backoff_ms = {d}\n\n", .{self.raw.provider_reliable.backoff_ms});
+
+        // [providers.<name>] - named providers sorted by name
+        if (self.raw.provider_named.len > 0) {
+            const np_idxs = try a.alloc(usize, self.raw.provider_named.len);
+            defer a.free(np_idxs);
+            for (np_idxs, 0..) |*p, i| p.* = i;
+            const named = self.raw.provider_named;
+            std.sort.block(usize, np_idxs, named, struct {
+                fn lessThan(named_: []NamedProviderConfig, ai: usize, bi: usize) bool {
+                    return std.mem.lessThan(u8, named_[ai].name, named_[bi].name);
+                }
+            }.lessThan);
+
+            for (np_idxs) |i| {
+                const np = named[i];
+                try w.print("[providers.{s}]\n", .{np.name});
+                try w.writeAll("kind = ");
+                try writeTomlString(w, @tagName(np.kind));
+                try w.writeAll("\n");
+                if (np.model.len > 0) {
+                    try w.writeAll("model = ");
+                    try writeTomlString(w, np.model);
+                    try w.writeAll("\n");
+                }
+                try w.print("temperature = {d}\n", .{np.temperature});
+                if (np.base_url.len > 0) {
+                    try w.writeAll("base_url = ");
+                    try writeTomlString(w, np.base_url);
+                    try w.writeAll("\n");
+                }
+                // Omit api_key (secret)
+                if (np.api_key_vault.len > 0) {
+                    try w.writeAll("api_key_vault = ");
+                    try writeTomlString(w, np.api_key_vault);
+                    try w.writeAll("\n");
+                }
+                if (np.api_key_env.len > 0) {
+                    try w.writeAll("api_key_env = ");
+                    try writeTomlString(w, np.api_key_env);
+                    try w.writeAll("\n");
+                }
+                try w.writeAll("\n");
+            }
+        }
 
         // [memory]
         try w.writeAll("[memory]\n");
@@ -776,6 +861,9 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
     var agent_names = std.StringHashMap(void).init(a);
     defer agent_names.deinit();
 
+    var named_provider_names = std.StringHashMap(void).init(a);
+    defer named_provider_names.deinit();
+
     var it = parsed.keys.map.iterator();
     while (it.next()) |e| {
         const k = e.key_ptr.*;
@@ -973,6 +1061,23 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
             continue;
         }
 
+        // Named providers: providers.X.Y where X is not primary/fixtures/reliable
+        if (std.mem.startsWith(u8, k, "providers.")) {
+            const rest = k["providers.".len..];
+            if (!std.mem.startsWith(u8, rest, "primary.") and
+                !std.mem.startsWith(u8, rest, "fixtures.") and
+                !std.mem.startsWith(u8, rest, "reliable."))
+            {
+                const dot = std.mem.indexOfScalar(u8, rest, '.') orelse {
+                    try unknownKeyWarn(a, &warns, k);
+                    continue;
+                };
+                const prov_name = rest[0..dot];
+                _ = try named_provider_names.put(prov_name, {});
+                continue;
+            }
+        }
+
         if (std.mem.eql(u8, k, "memory.backend")) {
             const s = try coerceString(v);
             if (std.mem.eql(u8, s, "markdown")) cfg.memory.backend = .markdown else if (std.mem.eql(u8, s, "sqlite")) cfg.memory.backend = .sqlite else {
@@ -1069,7 +1174,12 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
             const field = rest[dot + 1 ..];
             if (std.mem.eql(u8, field, "capability_preset") or
                 std.mem.eql(u8, field, "delegate_to") or
-                std.mem.eql(u8, field, "system_prompt"))
+                std.mem.eql(u8, field, "system_prompt") or
+                std.mem.eql(u8, field, "provider") or
+                std.mem.eql(u8, field, "provider_model") or
+                std.mem.eql(u8, field, "provider_temperature") or
+                std.mem.eql(u8, field, "provider_base_url") or
+                std.mem.eql(u8, field, "provider_api_key_env"))
             {
                 _ = try agent_names.put(id, {});
                 continue;
@@ -1186,6 +1296,71 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
 
     cfg.capabilities.presets = try presets.toOwnedSlice();
 
+    // Build named provider pool
+    {
+        var np_names_list = std.array_list.Managed([]const u8).init(a);
+        defer np_names_list.deinit();
+        {
+            var itnp = named_provider_names.keyIterator();
+            while (itnp.next()) |kp| try np_names_list.append(kp.*);
+        }
+        std.sort.block([]const u8, np_names_list.items, {}, struct {
+            fn lt(_: void, a_: []const u8, b_: []const u8) bool {
+                return std.mem.lessThan(u8, a_, b_);
+            }
+        }.lt);
+
+        var named_providers = std.array_list.Managed(NamedProviderConfig).init(a);
+        errdefer {
+            for (named_providers.items) |np| freeNamedProvider(a, np);
+            named_providers.deinit();
+        }
+
+        for (np_names_list.items) |np_name| {
+            const kind_key = try std.fmt.allocPrint(a, "providers.{s}.kind", .{np_name});
+            defer a.free(kind_key);
+            const model_key = try std.fmt.allocPrint(a, "providers.{s}.model", .{np_name});
+            defer a.free(model_key);
+            const temp_key = try std.fmt.allocPrint(a, "providers.{s}.temperature", .{np_name});
+            defer a.free(temp_key);
+            const url_key = try std.fmt.allocPrint(a, "providers.{s}.base_url", .{np_name});
+            defer a.free(url_key);
+            const apikey_key = try std.fmt.allocPrint(a, "providers.{s}.api_key", .{np_name});
+            defer a.free(apikey_key);
+            const vault_key = try std.fmt.allocPrint(a, "providers.{s}.api_key_vault", .{np_name});
+            defer a.free(vault_key);
+            const env_key = try std.fmt.allocPrint(a, "providers.{s}.api_key_env", .{np_name});
+            defer a.free(env_key);
+
+            var np_cfg = NamedProviderConfig{ .name = try a.dupe(u8, np_name) };
+            errdefer freeNamedProvider(a, np_cfg);
+
+            if (parsed.keys.map.get(kind_key)) |kv| {
+                const s = try coerceString(kv);
+                if (std.mem.eql(u8, s, "stub")) {
+                    np_cfg.kind = .stub;
+                } else if (std.mem.eql(u8, s, "openai_compat")) {
+                    np_cfg.kind = .openai_compat;
+                } else {
+                    try warns.append(.{
+                        .key_path = try a.dupe(u8, kind_key),
+                        .message = try std.fmt.allocPrint(a, "unknown provider kind '{s}', using 'openai_compat'", .{s}),
+                    });
+                }
+            }
+            if (parsed.keys.map.get(model_key)) |mv| np_cfg.model = try coerceStringDup(a, mv);
+            if (parsed.keys.map.get(temp_key)) |tv| np_cfg.temperature = try coerceF64(tv);
+            if (parsed.keys.map.get(url_key)) |uv| np_cfg.base_url = try coerceStringDup(a, uv);
+            if (parsed.keys.map.get(apikey_key)) |av| np_cfg.api_key = try coerceStringDup(a, av);
+            if (parsed.keys.map.get(vault_key)) |vv| np_cfg.api_key_vault = try coerceStringDup(a, vv);
+            if (parsed.keys.map.get(env_key)) |ev| np_cfg.api_key_env = try coerceStringDup(a, ev);
+
+            try named_providers.append(np_cfg);
+        }
+
+        cfg.provider_named = try named_providers.toOwnedSlice();
+    }
+
     // Build static agent profiles for multi-agent orchestration.
     var agent_ids = std.array_list.Managed([]const u8).init(a);
     defer agent_ids.deinit();
@@ -1212,6 +1387,16 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
         defer a.free(delegate_to_key);
         const prompt_key = try std.fmt.allocPrint(a, "agents.{s}.system_prompt", .{id});
         defer a.free(prompt_key);
+        const ag_provider_key = try std.fmt.allocPrint(a, "agents.{s}.provider", .{id});
+        defer a.free(ag_provider_key);
+        const ag_model_key = try std.fmt.allocPrint(a, "agents.{s}.provider_model", .{id});
+        defer a.free(ag_model_key);
+        const ag_temp_key = try std.fmt.allocPrint(a, "agents.{s}.provider_temperature", .{id});
+        defer a.free(ag_temp_key);
+        const ag_url_key = try std.fmt.allocPrint(a, "agents.{s}.provider_base_url", .{id});
+        defer a.free(ag_url_key);
+        const ag_env_key = try std.fmt.allocPrint(a, "agents.{s}.provider_api_key_env", .{id});
+        defer a.free(ag_env_key);
 
         const preset_v = parsed.keys.map.get(preset_key);
         const delegate_v = parsed.keys.map.get(delegate_to_key);
@@ -1221,11 +1406,22 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
         const delegate_to = if (delegate_v) |dv| try coerceStringArrayDup(a, dv) else try dupeStrs(a, &.{});
         const system_prompt = if (prompt_v) |sv| try coerceStringDup(a, sv) else try a.dupe(u8, "");
 
+        const ag_provider = if (parsed.keys.map.get(ag_provider_key)) |pv| try coerceStringDup(a, pv) else @as([]const u8, "");
+        const ag_model = if (parsed.keys.map.get(ag_model_key)) |mv| try coerceStringDup(a, mv) else @as([]const u8, "");
+        const ag_temp: ?f64 = if (parsed.keys.map.get(ag_temp_key)) |tv| try coerceF64(tv) else null;
+        const ag_url = if (parsed.keys.map.get(ag_url_key)) |uv| try coerceStringDup(a, uv) else @as([]const u8, "");
+        const ag_env = if (parsed.keys.map.get(ag_env_key)) |ev| try coerceStringDup(a, ev) else @as([]const u8, "");
+
         try agents.append(.{
             .id = try a.dupe(u8, id),
             .capability_preset = capability_preset,
             .delegate_to = delegate_to,
             .system_prompt = system_prompt,
+            .provider = ag_provider,
+            .provider_model = ag_model,
+            .provider_temperature = ag_temp,
+            .provider_base_url = ag_url,
+            .provider_api_key_env = ag_env,
         });
     }
 
@@ -1271,6 +1467,27 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
                     try warns.append(.{
                         .key_path = try std.fmt.allocPrint(a, "agents.{s}.delegate_to", .{ag.id}),
                         .message = try std.fmt.allocPrint(a, "unknown delegate target '{s}'", .{target}),
+                    });
+                }
+            }
+        }
+    }
+
+    // Validate agent provider references against named provider pool
+    if (cfg.orchestration.agents.len > 0 and cfg.provider_named.len > 0) {
+        for (cfg.orchestration.agents) |ag| {
+            if (ag.provider.len > 0) {
+                var found = false;
+                for (cfg.provider_named) |np| {
+                    if (std.mem.eql(u8, np.name, ag.provider)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    try warns.append(.{
+                        .key_path = try std.fmt.allocPrint(a, "agents.{s}.provider", .{ag.id}),
+                        .message = try std.fmt.allocPrint(a, "unknown named provider '{s}'", .{ag.provider}),
                     });
                 }
             }
@@ -1507,6 +1724,11 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
         a.free(cfg.orchestration.agents);
     }
 
+    if (cfg.provider_named.ptr != d.provider_named.ptr) {
+        for (cfg.provider_named) |np| freeNamedProvider(a, np);
+        a.free(cfg.provider_named);
+    }
+
     if (cfg.automation.pickup_statuses.ptr != d.automation.pickup_statuses.ptr) {
         for (cfg.automation.pickup_statuses) |s| a.free(s);
         a.free(cfg.automation.pickup_statuses);
@@ -1536,6 +1758,19 @@ fn freeAgentProfile(a: std.mem.Allocator, ag: AgentProfileConfig) void {
     for (ag.delegate_to) |s| a.free(s);
     a.free(ag.delegate_to);
     a.free(ag.system_prompt);
+    if (ag.provider.len > 0) a.free(ag.provider);
+    if (ag.provider_model.len > 0) a.free(ag.provider_model);
+    if (ag.provider_base_url.len > 0) a.free(ag.provider_base_url);
+    if (ag.provider_api_key_env.len > 0) a.free(ag.provider_api_key_env);
+}
+
+fn freeNamedProvider(a: std.mem.Allocator, np: NamedProviderConfig) void {
+    a.free(np.name);
+    if (np.model.len > 0) a.free(np.model);
+    if (np.base_url.len > 0) a.free(np.base_url);
+    if (np.api_key.len > 0) a.free(np.api_key);
+    if (np.api_key_vault.len > 0) a.free(np.api_key_vault);
+    if (np.api_key_env.len > 0) a.free(np.api_key_env);
 }
 
 fn freeWarnings(a: std.mem.Allocator, warnings: []Warning) void {

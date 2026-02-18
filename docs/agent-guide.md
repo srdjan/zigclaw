@@ -193,6 +193,87 @@ system_prompt = "Implement delegated tasks."
 - `system_prompt` - Appended after the base system prompt as an additional system
   message.
 
+### Multi-Model Provider Selection
+
+By default, every agent uses `[providers.primary]`. You can override this per-agent
+using named providers and inline fields. The resolution priority is (lowest to highest):
+
+1. `[providers.primary]` - global default
+2. Named provider (`provider = "capable"`) - inherits from a `[providers.NAME]` block
+3. Inline agent fields (`provider_model`, `provider_temperature`, etc.) - highest priority
+
+**Named provider pool:** define additional providers alongside `[providers.primary]`:
+
+```toml
+[providers.primary]
+kind = "openai_compat"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.capable]
+kind = "openai_compat"
+model = "gpt-4.1"
+temperature = 0.3
+api_key_env = "OPENAI_API_KEY"
+```
+
+**Per-agent provider assignment:** reference a named provider by name, or override
+individual fields inline:
+
+```toml
+[agents.planner]
+capability_preset = "readonly"
+delegate_to = ["writer"]
+system_prompt = "Break work into steps and delegate."
+# Uses providers.primary (default) - cheap model for planning
+
+[agents.writer]
+capability_preset = "dev"
+delegate_to = []
+system_prompt = "Implement delegated tasks."
+provider = "capable"           # use the named provider
+```
+
+**Inline overrides** take precedence over the named provider. This lets you use a
+named provider as a base and tweak specific fields per agent:
+
+```toml
+[agents.reviewer]
+capability_preset = "readonly"
+delegate_to = []
+system_prompt = "Review the implementation."
+provider = "capable"
+provider_temperature = 0.1     # override the named provider's temperature
+```
+
+You can also use inline overrides without a named provider at all:
+
+```toml
+[agents.writer]
+capability_preset = "dev"
+delegate_to = []
+system_prompt = "Implement delegated tasks."
+provider_model = "gpt-4.1"
+provider_temperature = 0.8
+```
+
+**Agent provider fields:**
+
+- `provider` - Name of a `[providers.NAME]` block to use as base.
+- `provider_model` - Override the model name.
+- `provider_temperature` - Override temperature (note: 0.0 is a valid override).
+- `provider_base_url` - Override the base URL.
+- `provider_api_key_env` - Override the API key environment variable name.
+
+**API key management:** when using multiple providers that require different API keys,
+set each provider's `api_key_env` to a distinct environment variable name. The
+`zigclaw init` wizard will list all required environment variables in the next-steps
+output.
+
+**Decision log:** the `provider.select` event now includes agent context in the reason
+field: `agent=writer kind=openai_compat model=gpt-4.1`. This makes it straightforward
+to verify which model was used for each agent in a multi-agent run.
+
 ### The `delegate_agent` Tool
 
 When `delegate_to` is non-empty, a synthetic tool called `delegate_agent` is injected
@@ -428,6 +509,12 @@ presented in the system prompt under a `[Memory context]` block.
 [orchestration]
 leader_agent = "planner"
 
+[providers.capable]
+kind = "openai_compat"
+model = "gpt-4.1"
+temperature = 0.3
+api_key_env = "OPENAI_API_KEY"
+
 [agents.planner]
 capability_preset = "readonly"
 delegate_to = ["writer"]
@@ -437,9 +524,11 @@ system_prompt = "Break work into steps and delegate."
 capability_preset = "dev"
 delegate_to = []
 system_prompt = "Implement delegated tasks."
+provider = "capable"
 ```
 
-See section 3 above for semantics. If `leader_agent` is empty but agents are defined,
+See section 3 above for semantics, including per-agent provider overrides via named
+providers and inline fields. If `leader_agent` is empty but agents are defined,
 the first agent alphabetically becomes the leader. If the named leader is not found in
 `[agents.*]`, a config warning is emitted and the first agent is used.
 
@@ -648,7 +737,8 @@ Decision categories logged throughout the system:
 - `tool.allow` - Whether a tool call was permitted by the preset.
 - `tool.network` - Whether a tool's network access was permitted.
 - `provider.network` - Whether the provider was allowed to make network calls.
-- `provider.select` - Which provider and model were selected for the run.
+- `provider.select` - Which provider and model were selected for the run. Reason
+  includes `agent=`, `kind=`, and `model=` fields for multi-model tracing.
 - `provider.fixtures` - Whether the fixtures wrapper is active.
 - `provider.reliable` - Whether the reliable retry wrapper is active.
 - `memory.backend` - Which memory backend was used.
@@ -684,6 +774,8 @@ Run `zigclaw config validate` to check for parse errors and warnings. Common war
 - `rate_limit_window_ms invalid; clamping to 1` - Value was 0.
 - `leader not found in [agents.*]` - The named leader agent does not exist.
 - `unknown delegate target` - An agent's `delegate_to` references a nonexistent agent.
+- `unknown named provider` - An agent's `provider` references a `[providers.NAME]`
+  section that does not exist.
 
 ### Verifying Policy Hash
 

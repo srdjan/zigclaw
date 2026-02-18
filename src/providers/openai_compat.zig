@@ -100,7 +100,7 @@ fn buildRequestBody(a: std.mem.Allocator, req: provider.ChatRequest) ![]u8 {
     if (req.messages.len > 0) {
         // Multi-turn path: use messages directly
         for (req.messages) |msg| {
-            try writeMessage(&stream, &aw.writer, msg);
+            try writeMessage(&stream, msg);
         }
     } else {
         // Legacy single-turn path: build from system/user/memory_context
@@ -138,8 +138,9 @@ fn buildRequestBody(a: std.mem.Allocator, req: provider.ChatRequest) ![]u8 {
             try stream.objectField("description");
             try stream.write(tool.description);
             try stream.objectField("parameters");
-            // parameters_json is already a JSON string; write raw
-            try aw.writer.writeAll(tool.parameters_json);
+            try stream.beginWriteRaw();
+            try stream.writer.writeAll(tool.parameters_json);
+            stream.endWriteRaw();
             try stream.endObject(); // function
             try stream.endObject(); // tool
         }
@@ -153,7 +154,7 @@ fn buildRequestBody(a: std.mem.Allocator, req: provider.ChatRequest) ![]u8 {
     return try aw.toOwnedSlice();
 }
 
-fn writeMessage(stream: anytype, raw_writer: anytype, msg: provider.Message) !void {
+fn writeMessage(stream: anytype, msg: provider.Message) !void {
     try stream.beginObject();
     try stream.objectField("role");
     try stream.write(@tagName(msg.role));
@@ -163,8 +164,9 @@ fn writeMessage(stream: anytype, raw_writer: anytype, msg: provider.Message) !vo
         try stream.write(c);
     } else {
         try stream.objectField("content");
-        // Write raw "null" to avoid string quoting
-        try raw_writer.writeAll("null");
+        try stream.beginWriteRaw();
+        try stream.writer.writeAll("null");
+        stream.endWriteRaw();
     }
 
     // Assistant messages with tool calls

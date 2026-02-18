@@ -32,7 +32,7 @@ rate_limit_max_requests = 60
 rate_limit_dir = "./.zigclaw/gateway_rate_limit"
 
 [providers.primary]
-kind = "stub"                # "stub" | "openai_compat"
+kind = "openai_compat"       # "stub" | "openai_compat"
 model = "gpt-4.1-mini"
 temperature = 0.2
 base_url = "https://api.openai.com/v1"

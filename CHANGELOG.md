@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased] - 2026-02-18
 
 ### Added
+- Config tooling improvements:
+  - `zigclaw config schema` command: generates a JSON Schema from the `Config` struct for editor autocompletion (VS Code Even Better TOML, etc.).
+  - `zigclaw config diff --a <file1> --b <file2> [--json]` command: semantic diff between two TOML config files, reporting added, removed, and changed keys with old/new values.
+  - "Did you mean?" suggestions for misspelled config keys: unknown keys now show the closest valid key name when within Levenshtein distance 2.
+  - Comment preservation in TOML round-trip: inline comments (e.g. `# "stub" | "openai_compat"`) survive `config validate` normalization.
+  - Shared string utilities extracted to `src/util/str.zig` (Levenshtein distance, closest match).
 - Multi-model orchestration: per-agent provider selection via named providers (`[providers.NAME]` sections) and inline agent overrides (`provider_model`, `provider_temperature`, `provider_base_url`, `provider_api_key_env`). Resolution priority: `[providers.primary]` < named provider < inline fields.
 - `NamedProviderConfig` struct and `provider_named` field on `Config`.
 - Extended `AgentProfileConfig` with `provider`, `provider_model`, `provider_temperature`, `provider_base_url`, `provider_api_key_env` fields.

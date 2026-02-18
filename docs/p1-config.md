@@ -28,6 +28,13 @@
 - Type/range validation is field-specific, not a generic declarative schema engine.
 - Error reporting is warning/key-oriented; no rich line/column diagnostics.
 
+## Config Tooling
+
+- `zigclaw config schema`: generates a JSON Schema from the `Config` struct hierarchy. The schema maps TOML section names to JSON properties with type, enum, and default annotations. Useful for editor autocompletion (VS Code Even Better TOML + schema association).
+- `zigclaw config diff --a <file1> --b <file2> [--json]`: semantic diff between two TOML config files. Reports added, removed, and changed keys with values. JSON output mode available.
+- "Did you mean?" suggestions: unknown config keys produce a suggestion when a known key is within Levenshtein distance 2. Covers all static keys plus dynamic section fields (`agents.*`, `providers.*`, `capabilities.presets.*`).
+- Comment preservation: inline comments on key-value lines survive the parse-normalize round-trip. Block comments (standalone `# ...` lines before sections) are also preserved. The `CommentMap` struct stores both types separately and threads through `loadAndValidate` into `ValidatedConfig`.
+
 ## Current Config Sections
 
 Current typed schema in `src/config.zig` includes:

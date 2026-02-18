@@ -765,11 +765,34 @@ crashed or was killed mid-run. Move the file back to `incoming` to requeue it, o
 delete it if the job is no longer needed. The file naming convention is
 `<timestamp_ms>_<request_id>.json`.
 
+### Config Tooling
+
+Generate a JSON Schema for editor autocompletion:
+```
+zigclaw config schema > zigclaw-schema.json
+```
+
+The schema covers all config sections and fields with types, enums, and defaults. Pair
+it with VS Code's Even Better TOML extension (or similar) for real-time validation and
+autocompletion while editing `zigclaw.toml`.
+
+Compare two config files semantically:
+```
+zigclaw config diff --a zigclaw.toml --b zigclaw-prod.toml
+zigclaw config diff --a zigclaw.toml --b zigclaw-prod.toml --json
+```
+
+Output shows added, removed, and changed keys with their values. JSON mode returns a
+structured array of `{key, kind, old, new}` entries.
+
 ### Config Validation
 
-Run `zigclaw config validate` to check for parse errors and warnings. Common warnings:
+Run `zigclaw config validate` to check for parse errors and warnings. Inline comments
+from the original file are preserved through the round-trip. Common warnings:
 
-- `unknown key (ignored)` - A TOML key that does not map to any config field.
+- `unknown key (ignored)` - A TOML key that does not map to any config field. When a
+  close match exists (Levenshtein distance <= 2), a "did you mean?" suggestion is
+  appended to the warning.
 - `retry_jitter_pct out of range; clamping to 100` - Value was greater than 100.
 - `rate_limit_window_ms invalid; clamping to 1` - Value was 0.
 - `leader not found in [agents.*]` - The named leader agent does not exist.

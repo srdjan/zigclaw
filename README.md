@@ -2,7 +2,7 @@
 
 ZigClaw is a local-first Zig agent runtime with:
 - `zigclaw chat` as the primary entry point: interactive session, one-shot, or stdin pipe; multi-turn context retained across turns
-- config-driven capability presets and compiled policy hash
+- config-driven capability presets and compiled policy hash; JSON Schema generation, semantic diff, and "did you mean?" typo suggestions for config keys
 - tool execution via plugin manifests (WASI plugins and native plugins)
 - provider abstraction (`stub`, `openai_compat`) with fixture and retry wrappers; zero-config auto-detection when `OPENAI_API_KEY` is present; named providers for per-agent multi-model orchestration
 - setup wizard, encrypted vault secrets, and in-place self-update command
@@ -109,6 +109,8 @@ zigclaw queue watch --request-id <id> [--include-payload] [--poll-ms N] [--timeo
 zigclaw queue cancel --request-id <id> [--config zigclaw.toml]
 zigclaw queue metrics [--config zigclaw.toml]
 zigclaw config validate [--config zigclaw.toml] [--format toml|text|json] [--json]
+zigclaw config diff --a <file1.toml> --b <file2.toml> [--json]
+zigclaw config schema
 zigclaw policy hash [--config zigclaw.toml] [--json]
 zigclaw policy explain (--tool <name> | --mount <path> | --command "cmd") [--config zigclaw.toml]
 zigclaw audit report [--request-id <id>] [--from <ts>] [--to <ts>] [--format text|json] [--config zigclaw.toml]
@@ -130,7 +132,20 @@ Validate and print normalized config:
 zig-out/bin/zigclaw config validate --config zigclaw.toml --format toml
 ```
 
-Normalized output is stable and omits `providers.primary.api_key`.
+Normalized output is stable and omits `providers.primary.api_key`. Inline comments from the original file are preserved through the round-trip (e.g. `kind = "openai_compat" # "stub" | "openai_compat"`).
+
+Unknown keys produce warnings with "did you mean?" suggestions when a close match exists (Levenshtein distance <= 2). For example, writing `knd` instead of `kind` yields: `warning: unknown key 'providers.primary.knd' (ignored) - did you mean 'providers.primary.kind'?`.
+
+Semantic diff between two config files:
+```sh
+zig-out/bin/zigclaw config diff --a zigclaw.toml --b zigclaw-prod.toml
+zig-out/bin/zigclaw config diff --a zigclaw.toml --b zigclaw-prod.toml --json
+```
+
+Generate a JSON Schema describing all config fields (for editor autocompletion via Even Better TOML or similar):
+```sh
+zig-out/bin/zigclaw config schema > zigclaw-schema.json
+```
 
 Canonical normalized example (matches `tests/golden/config_normalized.toml`):
 ```toml

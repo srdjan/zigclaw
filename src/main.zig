@@ -30,8 +30,14 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "--help-all")) {
+        try usageAll(io);
+        return;
+    }
+
     if (argv.len >= 3 and isHelpArg(argv[2])) {
         if (std.mem.eql(u8, cmd, "agent")) return usageAgent(io);
+        if (std.mem.eql(u8, cmd, "chat")) return usageChat(io);
         if (std.mem.eql(u8, cmd, "doctor")) return usageDoctor(io);
         if (std.mem.eql(u8, cmd, "update")) return usageUpdate(io);
         if (std.mem.eql(u8, cmd, "run")) return usageRun(io);
@@ -80,7 +86,91 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
     }
 
     if (std.mem.eql(u8, cmd, "setup")) {
-        try runOnboarding(a, io, true);
+        try runOnboarding(a, io, true, false);
+        return;
+    }
+
+    if (std.mem.eql(u8, cmd, "chat")) {
+        const term = @import("util/term.zig");
+        const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
+        const verbose = hasFlag(argv, "--verbose");
+        const agent_id = flagValue(argv, "--agent");
+        const as_json = hasFlag(argv, "--json");
+        const model_override = flagValue(argv, "--model");
+        const preset_override = flagValue(argv, "--preset");
+
+        var app_c = try App.init(a, io);
+        defer app_c.deinit();
+        var validated = try app_c.loadConfig(cfg_path);
+        defer validated.deinit(a);
+
+        if (model_override) |m| validated.raw.provider_primary.model = m;
+        if (preset_override) |p| validated.raw.capabilities.active_preset = p;
+
+        // Positional message: zigclaw chat "something"
+        const positional_msg: ?[]const u8 = if (argv.len >= 3 and argv[2][0] != '-') argv[2] else null;
+        const explicit_msg = flagValue(argv, "--message");
+        const piped_msg: ?[]const u8 = if (positional_msg == null and explicit_msg == null and !term.stdinIsTty()) blk: {
+            const stdin = std.Io.File.stdin();
+            var rbuf: [4096]u8 = undefined;
+            var reader = stdin.reader(io, &rbuf);
+            break :blk reader.interface.allocRemaining(a, std.Io.Limit.limited(1 * 1024 * 1024)) catch null;
+        } else null;
+        defer if (piped_msg) |pm| a.free(pm);
+
+        const msg = positional_msg orelse explicit_msg orelse piped_msg orelse null;
+        const interactive = msg == null;
+
+        if (as_json and interactive) return error.InvalidArgs;
+
+        if (as_json) {
+            const trace = @import("obs/trace.zig");
+            const loop = @import("agent/loop.zig");
+            const rid = trace.newRequestId(io);
+            var result = try loop.runLoop(a, io, validated, msg.?, rid.slice(), .{
+                .verbose = verbose,
+                .interactive = false,
+                .agent_id = agent_id,
+            });
+            defer result.deinit(a);
+            const out = try jsonObj(a, .{
+                .request_id = rid.slice(),
+                .turns = result.turns,
+                .content = result.content,
+            });
+            defer a.free(out);
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{out});
+            try ow.flush();
+        } else if (interactive) {
+            try app_c.runAgent(validated, "hello", .{
+                .verbose = verbose,
+                .interactive = true,
+                .agent_id = agent_id,
+            });
+        } else {
+            // Non-interactive, non-json: print thinking... then result
+            {
+                var ebuf: [256]u8 = undefined;
+                var ew = std.Io.File.stderr().writer(io, &ebuf);
+                try ew.interface.writeAll("thinking...\n");
+                try ew.flush();
+            }
+            const trace = @import("obs/trace.zig");
+            const loop = @import("agent/loop.zig");
+            const rid = trace.newRequestId(io);
+            var result = try loop.runLoop(a, io, validated, msg.?, rid.slice(), .{
+                .verbose = verbose,
+                .interactive = false,
+                .agent_id = agent_id,
+            });
+            defer result.deinit(a);
+            var obuf: [4096]u8 = undefined;
+            var ow = std.Io.File.stdout().writer(io, &obuf);
+            try ow.interface.print("{s}\n", .{result.content});
+            try ow.flush();
+        }
         return;
     }
 
@@ -348,7 +438,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usageVault(io);
         return;
     }
 
@@ -368,7 +458,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             try printRunSummary(a, io, validated, rid, as_json);
             return;
         }
-        try usage(io);
+        try usageRun(io);
         return;
     }
 
@@ -406,7 +496,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usageOps(io);
         return;
     }
 
@@ -515,7 +605,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usageAudit(io);
         return;
     }
 
@@ -557,20 +647,37 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             try ow.flush();
             return;
         }
-        try usage(io);
+        try usageConfig(io);
         return;
     }
 
     if (std.mem.eql(u8, cmd, "agent")) {
-        const msg = flagValue(argv, "--message") orelse "hello";
+        const term = @import("util/term.zig");
+        const explicit_msg = flagValue(argv, "--message");
         const cfg_path = flagValue(argv, "--config") orelse "zigclaw.toml";
         const verbose = hasFlag(argv, "--verbose");
         const interactive = hasFlag(argv, "--interactive");
         const agent_id = flagValue(argv, "--agent");
         const as_json = hasFlag(argv, "--json");
+        const model_override = flagValue(argv, "--model");
+        const preset_override = flagValue(argv, "--preset");
+
+        // Stdin piping: if no --message and stdin is piped, read it
+        const piped_msg: ?[]const u8 = if (explicit_msg == null and !interactive and !term.stdinIsTty()) blk: {
+            const stdin = std.Io.File.stdin();
+            var rbuf: [4096]u8 = undefined;
+            var reader = stdin.reader(io, &rbuf);
+            break :blk reader.interface.allocRemaining(a, std.Io.Limit.limited(1 * 1024 * 1024)) catch null;
+        } else null;
+        defer if (piped_msg) |pm| a.free(pm);
+
+        const msg = explicit_msg orelse piped_msg orelse "hello";
 
         var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
+
+        if (model_override) |m| validated.raw.provider_primary.model = m;
+        if (preset_override) |p| validated.raw.capabilities.active_preset = p;
 
         const trace = @import("obs/trace.zig");
         const loop = @import("agent/loop.zig");
@@ -616,6 +723,14 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
                 return;
             }
 
+            // Progress indication for non-interactive, non-json runs
+            {
+                var ebuf: [256]u8 = undefined;
+                var ew = std.Io.File.stderr().writer(io, &ebuf);
+                try ew.interface.writeAll("thinking...\n");
+                try ew.flush();
+            }
+
             const rid = trace.newRequestId(io);
             var result = try loop.runLoop(a, io, validated, msg, rid.slice(), .{
                 .verbose = verbose,
@@ -652,11 +767,12 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "init")) {
         const as_json = hasFlag(argv, "--json");
         const quick = hasFlag(argv, "--quick") or hasFlag(argv, "--scaffold");
+        const full = hasFlag(argv, "--full");
         const guided = hasFlag(argv, "--guided");
         if (as_json or quick) {
-            try scaffoldProject(a, io, as_json);
+            try scaffoldProject(a, io, as_json, full);
         } else {
-            try runOnboarding(a, io, guided);
+            try runOnboarding(a, io, guided, full);
         }
         return;
     }
@@ -728,7 +844,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usagePrompt(io);
         return;
     }
 
@@ -777,7 +893,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usageTools(io);
         return;
     }
 
@@ -857,14 +973,14 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usageTask(io);
         return;
     }
 
     if (std.mem.eql(u8, cmd, "primitive")) {
         const sub: []const u8 = if (argv.len >= 3) argv[2] else "help";
         if (!std.mem.eql(u8, sub, "validate")) {
-            try usage(io);
+            try usageAll(io);
             return;
         }
         if (argv.len < 4) return error.InvalidArgs;
@@ -922,7 +1038,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usageTemplates(io);
         return;
     }
 
@@ -1051,7 +1167,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usageQueue(io);
         return;
     }
 
@@ -1146,7 +1262,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usageGit(io);
         return;
     }
 
@@ -1198,7 +1314,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usagePolicy(io);
         return;
     }
 
@@ -1333,14 +1449,14 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
             return;
         }
 
-        try usage(io);
+        try usageReplay(io);
         return;
     }
 
     if (std.mem.eql(u8, cmd, "gateway")) {
         const sub: []const u8 = if (argv.len >= 3) argv[2] else "start";
         if (!std.mem.eql(u8, sub, "start")) {
-            try usage(io);
+            try usageGateway(io);
             return;
         }
 
@@ -1356,7 +1472,66 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         return;
     }
 
-    try usage(io);
+    try unknownCommand(io, cmd);
+}
+
+const known_commands = [_][]const u8{
+    "version",   "doctor",  "setup",     "update",    "chat",
+    "agent",     "init",    "run",       "ops",       "vault",
+    "config",    "prompt",  "tools",     "task",      "primitive",
+    "templates", "queue",   "git",       "policy",    "audit",
+    "attest",    "replay",  "gateway",   "completion",
+};
+
+fn unknownCommand(io: std.Io, cmd: []const u8) !void {
+    const term = @import("util/term.zig");
+    const color = term.stderrSupportsColor();
+    var ebuf: [1024]u8 = undefined;
+    var ew = std.Io.File.stderr().writer(io, &ebuf);
+
+    try term.writeStyled(&ew.interface, .red, "error:", color);
+    try ew.interface.print(" unknown command '{s}'\n", .{cmd});
+
+    var best: ?[]const u8 = null;
+    var best_dist: usize = 3; // suggest only if distance <= 2
+    for (&known_commands) |kc| {
+        const d = levenshtein(cmd, kc);
+        if (d < best_dist) {
+            best_dist = d;
+            best = kc;
+        }
+    }
+
+    if (best) |suggestion| {
+        try term.writeStyled(&ew.interface, .yellow, "hint:", color);
+        try ew.interface.print(" did you mean '{s}'?\n", .{suggestion});
+    }
+
+    try ew.interface.writeAll("Run 'zigclaw --help' for available commands.\n");
+    try ew.flush();
+}
+
+fn levenshtein(a_str: []const u8, b_str: []const u8) usize {
+    if (a_str.len == 0) return b_str.len;
+    if (b_str.len == 0) return a_str.len;
+    if (b_str.len > 32) return b_str.len; // bail on long strings
+
+    var prev_row: [33]usize = undefined;
+    for (0..b_str.len + 1) |i| prev_row[i] = i;
+
+    for (a_str, 0..) |a_ch, i| {
+        var cur_row: [33]usize = undefined;
+        cur_row[0] = i + 1;
+        for (b_str, 0..) |b_ch, j| {
+            const cost: usize = if (a_ch == b_ch) 0 else 1;
+            cur_row[j + 1] = @min(@min(
+                cur_row[j] + 1,
+                prev_row[j + 1] + 1,
+            ), prev_row[j] + cost);
+        }
+        prev_row = cur_row;
+    }
+    return prev_row[b_str.len];
 }
 
 fn flagValue(argv: []const [:0]const u8, name: []const u8) ?[]const u8 {
@@ -1419,12 +1594,12 @@ fn configValidateJsonAlloc(a: std.mem.Allocator, validated: config_mod.Validated
     return try aw.toOwnedSlice();
 }
 
-fn runOnboarding(a: std.mem.Allocator, io: std.Io, guided: bool) !void {
+fn runOnboarding(a: std.mem.Allocator, io: std.Io, guided: bool, full: bool) !void {
     if (guided) {
         const completed = try @import("setup/wizard.zig").run(a, io);
         if (!completed) return;
     } else {
-        try scaffoldProject(a, io, false);
+        try scaffoldProject(a, io, false, full);
     }
 
     var obuf: [4096]u8 = undefined;
@@ -1528,6 +1703,7 @@ fn completionScript(shell: []const u8) ?[]const u8 {
         \\    'doctor:Run environment diagnostics'
         \\    'setup:Run guided onboarding'
         \\    'update:Check or apply updates'
+        \\    'chat:Interactive agent session'
         \\    'run:Run-related helpers'
         \\    'ops:Operations dashboard helpers'
         \\    'vault:Manage encrypted secrets'
@@ -1581,7 +1757,7 @@ fn completionScript(shell: []const u8) ?[]const u8 {
         \\  local prev="${COMP_WORDS[COMP_CWORD-1]}"
         \\  local cmd="${COMP_WORDS[1]}"
         \\
-        \\  local cmds="version doctor setup update run ops vault init agent prompt tools task primitive templates git queue config policy audit attest replay gateway completion"
+        \\  local cmds="version doctor setup update chat run ops vault init agent prompt tools task primitive templates git queue config policy audit attest replay gateway completion"
         \\  if [[ ${COMP_CWORD} -eq 1 ]]; then
         \\    COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
         \\    return
@@ -1620,7 +1796,7 @@ fn completionScript(shell: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, shell, "fish")) {
         return 
         \\complete -c zigclaw -f
-        \\complete -c zigclaw -n '__fish_use_subcommand' -a 'version doctor setup update run ops vault init agent prompt tools task primitive templates git queue config policy audit attest replay gateway completion'
+        \\complete -c zigclaw -n '__fish_use_subcommand' -a 'version doctor setup update chat run ops vault init agent prompt tools task primitive templates git queue config policy audit attest replay gateway completion'
         \\complete -c zigclaw -n '__fish_seen_subcommand_from queue' -a 'enqueue-agent worker status watch cancel metrics'
         \\complete -c zigclaw -n '__fish_seen_subcommand_from vault' -a 'set get list delete'
         \\complete -c zigclaw -n '__fish_seen_subcommand_from run' -a 'summary'
@@ -1877,16 +2053,47 @@ fn usageAgent(io: std.Io) !void {
     try writeGroupHelp(io,
         \\agent
         \\Usage:
-        \\  zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml] [--json]
+        \\  zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--model m] [--preset p] [--config zigclaw.toml] [--json]
         \\
         \\Examples:
         \\  zigclaw agent --message "Summarize repo status" --config zigclaw.toml
         \\  zigclaw agent --message "hello" --agent planner --json
         \\  zigclaw agent --interactive --config zigclaw.toml
+        \\  zigclaw agent --message "hello" --model gpt-4.1 --preset readonly
         \\
         \\Related:
+        \\  zigclaw chat --help
         \\  zigclaw prompt --help
         \\  zigclaw policy --help
+    );
+}
+
+fn usageChat(io: std.Io) !void {
+    try writeGroupHelp(io,
+        \\chat
+        \\Usage:
+        \\  zigclaw chat                        Interactive session
+        \\  zigclaw chat "message"              One-shot with positional argument
+        \\  zigclaw chat --message "..."         One-shot with flag
+        \\  echo "msg" | zigclaw chat           One-shot from stdin pipe
+        \\
+        \\Flags:
+        \\  --agent id      Use a specific agent profile
+        \\  --model m       Override configured model
+        \\  --preset p      Override active capability preset
+        \\  --config path   Config file (default: zigclaw.toml)
+        \\  --json          JSON output (incompatible with interactive)
+        \\  --verbose       Verbose logging
+        \\
+        \\Examples:
+        \\  zigclaw chat
+        \\  zigclaw chat "What time is it?"
+        \\  zigclaw chat --model gpt-4.1 --preset dev "Write a test"
+        \\  echo "Summarize this file" | zigclaw chat
+        \\
+        \\Related:
+        \\  zigclaw agent --help
+        \\  zigclaw prompt --help
     );
 }
 
@@ -2222,12 +2429,19 @@ fn usageInit(io: std.Io) !void {
     try writeGroupHelp(io,
         \\init
         \\Usage:
-        \\  zigclaw init [--json]
-        \\  zigclaw init --quick [--json]
+        \\  zigclaw init [--full] [--json]
+        \\  zigclaw init --quick [--full] [--json]
         \\  zigclaw init --guided
+        \\
+        \\Flags:
+        \\  --full      Generate comprehensive config with all sections
+        \\              (default generates a minimal ~15-line config)
+        \\  --quick     Skip post-setup doctor check
+        \\  --guided    Interactive setup wizard
         \\
         \\Examples:
         \\  zigclaw init
+        \\  zigclaw init --full
         \\  zigclaw init --guided
         \\  zigclaw init --quick --json
         \\
@@ -2280,8 +2494,14 @@ fn printCliError(io: std.Io, argv: []const [:0]const u8, err: anyerror) !void {
         defer std.heap.page_allocator.free(payload);
         try ew.interface.print("{s}\n", .{payload});
     } else {
-        try ew.interface.print("error: {s}\n", .{err_name});
-        if (hint) |h| try ew.interface.print("hint: {s}\n", .{h});
+        const term = @import("util/term.zig");
+        const color = term.stderrSupportsColor();
+        try term.writeStyled(&ew.interface, .red, "error:", color);
+        try ew.interface.print(" {s}\n", .{err_name});
+        if (hint) |h| {
+            try term.writeStyled(&ew.interface, .yellow, "hint:", color);
+            try ew.interface.print(" {s}\n", .{h});
+        }
     }
     try ew.flush();
 }
@@ -2289,6 +2509,7 @@ fn printCliError(io: std.Io, argv: []const [:0]const u8, err: anyerror) !void {
 fn errorHint(cmd: []const u8, err: anyerror) ?[]const u8 {
     if (err == error.InvalidArgs) {
         if (std.mem.eql(u8, cmd, "agent")) return "agent arguments are invalid; `--json` cannot be combined with `--interactive`.";
+        if (std.mem.eql(u8, cmd, "chat")) return "chat arguments are invalid; `--json` cannot be combined with interactive mode.";
         if (std.mem.eql(u8, cmd, "run")) return "run arguments are invalid; use `zigclaw run summary --request-id <id>`.";
         if (std.mem.eql(u8, cmd, "ops")) return "ops arguments are invalid; use `zigclaw ops summary|watch --help`.";
         if (std.mem.eql(u8, cmd, "vault")) return "vault arguments are invalid; run `zigclaw --help` for subcommand usage.";
@@ -2328,7 +2549,7 @@ fn errorHint(cmd: []const u8, err: anyerror) ?[]const u8 {
     return null;
 }
 
-fn scaffoldProject(a: std.mem.Allocator, io: std.Io, as_json: bool) !void {
+fn scaffoldProject(a: std.mem.Allocator, io: std.Io, as_json: bool, full: bool) !void {
     const dir = std.Io.Dir.cwd();
     var obuf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
@@ -2352,8 +2573,28 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io, as_json: bool) !void {
         return;
     }
 
-    const default_config =
-        \\# zigclaw.toml - generated by zigclaw init
+    const minimal_config =
+        \\# zigclaw.toml
+        \\config_version = 1
+        \\
+        \\[providers.primary]
+        \\kind = "openai_compat"
+        \\model = "gpt-4.1-mini"
+        \\base_url = "https://api.openai.com/v1"
+        \\api_key_env = "OPENAI_API_KEY"
+        \\
+        \\[capabilities]
+        \\active_preset = "dev"
+        \\
+        \\[capabilities.presets.dev]
+        \\tools = ["echo", "fs_read", "fs_write", "shell_exec", "http_fetch"]
+        \\allow_network = true
+        \\allow_write_paths = ["./.zigclaw", "./tmp"]
+        \\
+    ;
+
+    const full_config =
+        \\# zigclaw.toml - generated by zigclaw init --full
         \\config_version = 1
         \\
         \\[capabilities]
@@ -2470,7 +2711,8 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io, as_json: bool) !void {
         \\
     ;
 
-    try dir.writeFile(io, .{ .sub_path = "zigclaw.toml", .data = default_config });
+    const config_data = if (full) full_config else minimal_config;
+    try dir.writeFile(io, .{ .sub_path = "zigclaw.toml", .data = config_data });
 
     // Create directories
     dir.createDirPath(io, ".zigclaw/memory") catch {};
@@ -2501,10 +2743,11 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io, as_json: bool) !void {
             .created = true,
             .config_path = "zigclaw.toml",
             .workspace_dir = ".zigclaw",
+            .full_config = full,
             .next_steps = .{
                 "Set OPENAI_API_KEY (or set providers.primary.kind=\"stub\")",
                 "zig build plugins",
-                "zigclaw agent --message \"hello\"",
+                "zigclaw chat",
             },
         });
         defer a.free(out);
@@ -2514,22 +2757,77 @@ fn scaffoldProject(a: std.mem.Allocator, io: std.Io, as_json: bool) !void {
         try ow.interface.writeAll("Next steps:\n");
         try ow.interface.writeAll("  1. Set OPENAI_API_KEY (or change providers.primary.kind to \"stub\")\n");
         try ow.interface.writeAll("  2. Build plugins: zig build plugins\n");
-        try ow.interface.writeAll("  3. Run: zigclaw agent --message \"hello\"\n");
+        try ow.interface.writeAll("  3. Run: zigclaw chat\n");
     }
     try ow.flush();
 }
 
 fn usage(io: std.Io) !void {
+    const term = @import("util/term.zig");
+    const color = term.stdoutSupportsColor();
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+    try term.writeStyled(&w.interface, .bold, "zigclaw", color);
+    try w.interface.writeAll(" - local AI agent runtime\n\n");
+
+    try term.writeStyled(&w.interface, .bold, "Getting Started:\n", color);
+    try w.interface.writeAll(
+        \\  init       Initialize workspace files
+        \\  setup      Guided onboarding wizard
+        \\  doctor     Run environment diagnostics
+        \\
+    );
+
+    try w.interface.writeAll("\n");
+    try term.writeStyled(&w.interface, .bold, "Agent:\n", color);
+    try w.interface.writeAll(
+        \\  chat       Interactive agent session (or one-shot with argument)
+        \\  agent      Run agent (--message, --interactive, --agent)
+        \\  tools      List, describe, and run tools
+        \\  task       Manage tasks (add, list, done)
+        \\
+    );
+
+    try w.interface.writeAll("\n");
+    try term.writeStyled(&w.interface, .bold, "Operations:\n", color);
+    try w.interface.writeAll(
+        \\  ops        Dashboard and live watch
+        \\  queue      Job queue (enqueue, worker, status, cancel)
+        \\  gateway    Start HTTP gateway server
+        \\
+    );
+
+    try w.interface.writeAll("\n");
+    try term.writeStyled(&w.interface, .bold, "Configuration:\n", color);
+    try w.interface.writeAll(
+        \\  config     Validate configuration
+        \\  vault      Manage encrypted secrets
+        \\  policy     Hash and explain capability policies
+        \\
+    );
+
+    try w.interface.writeAll(
+        \\
+        \\Use 'zigclaw <command> --help' for details.
+        \\Use 'zigclaw --help-all' for all commands including audit, attest, replay, git, etc.
+        \\
+    );
+    try w.flush();
+}
+
+fn usageAll(io: std.Io) !void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writer(io, &buf);
     try w.interface.writeAll(
-        \\zigclaw
+        \\zigclaw - all commands
         \\
         \\Usage:
         \\  zigclaw version [--json]
         \\  zigclaw doctor [--config zigclaw.toml] [--json]
         \\  zigclaw setup
         \\  zigclaw update [--check] [--url <manifest-url>] [--json]
+        \\  zigclaw chat ["message"] [--agent id] [--model m] [--preset p] [--config zigclaw.toml] [--json]
+        \\  zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--model m] [--preset p] [--config zigclaw.toml] [--json]
         \\  zigclaw run summary --request-id <id> [--config zigclaw.toml] [--json]
         \\  zigclaw ops summary [--format text|json] [--limit N] [--config zigclaw.toml]
         \\  zigclaw ops watch [--format text|json] [--limit N] [--poll-ms N] [--iterations N] [--config zigclaw.toml]
@@ -2537,8 +2835,7 @@ fn usage(io: std.Io) !void {
         \\  zigclaw vault get <name> [--vault <path>] [--json]
         \\  zigclaw vault list [--vault <path>] [--json]
         \\  zigclaw vault delete <name> [--vault <path>] [--json]
-        \\  zigclaw init [--json]
-        \\  zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml] [--json]
+        \\  zigclaw init [--full] [--json]
         \\  zigclaw prompt dump --message "..." [--format json|text] [--out path] [--config zigclaw.toml]
         \\  zigclaw prompt diff --a file --b file [--json]
         \\  zigclaw tools list [--config zigclaw.toml]
@@ -2553,7 +2850,7 @@ fn usage(io: std.Io) !void {
         \\  zigclaw templates validate [task] [--config zigclaw.toml]
         \\  zigclaw git init [--remote <url>] [--branch <name>] [--json] [--config zigclaw.toml]
         \\  zigclaw git status [--json] [--config zigclaw.toml]
-        \\  zigclaw git sync [--message \"...\"] [--push] [--json] [--config zigclaw.toml]
+        \\  zigclaw git sync [--message "..."] [--push] [--json] [--config zigclaw.toml]
         \\  zigclaw queue enqueue-agent --message "..." [--agent id] [--request-id id] [--config zigclaw.toml]
         \\  zigclaw queue worker [--once] [--max-jobs N] [--poll-ms N] [--config zigclaw.toml]
         \\  zigclaw queue status --request-id <id> [--include-payload] [--config zigclaw.toml]

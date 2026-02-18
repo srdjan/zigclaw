@@ -389,14 +389,27 @@ fn freeChecks(a: std.mem.Allocator, checks: []Check) void {
 }
 
 fn printText(io: std.Io, cfg_path: []const u8, report: Report) !void {
+    const term = @import("util/term.zig");
+    const color = term.stdoutSupportsColor();
     var obuf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
     try ow.interface.print("zigclaw doctor --config {s}\n", .{cfg_path});
     try ow.interface.print("summary: ok={d} warn={d} fail={d}\n\n", .{ report.ok_count, report.warn_count, report.fail_count });
 
     for (report.checks) |c| {
-        try ow.interface.print("[{s}] {s}: {s}\n", .{ levelName(c.level), c.id, c.message });
-        if (c.hint) |h| try ow.interface.print("  hint: {s}\n", .{h});
+        const level_style: term.Style = switch (c.level) {
+            .ok => .green,
+            .warn => .yellow,
+            .fail => .red,
+        };
+        try ow.interface.writeAll("[");
+        try term.writeStyled(&ow.interface, level_style, levelName(c.level), color);
+        try ow.interface.print("] {s}: {s}\n", .{ c.id, c.message });
+        if (c.hint) |h| {
+            try ow.interface.writeAll("  ");
+            try term.writeStyled(&ow.interface, .yellow, "hint:", color);
+            try ow.interface.print(" {s}\n", .{h});
+        }
     }
     try ow.flush();
 }

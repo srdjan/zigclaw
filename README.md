@@ -1,13 +1,15 @@
 # zigclaw
 
 ZigClaw is a local-first Zig agent runtime with:
+- `zigclaw chat` as the primary entry point: interactive session, one-shot, or stdin pipe; multi-turn context retained across turns
 - config-driven capability presets and compiled policy hash
 - tool execution via plugin manifests (WASI plugins and native plugins)
-- provider abstraction (`stub`, `openai_compat`) with fixture and retry wrappers
+- provider abstraction (`stub`, `openai_compat`) with fixture and retry wrappers; zero-config auto-detection when `OPENAI_API_KEY` is present
 - setup wizard, encrypted vault secrets, and in-place self-update command
 - queue worker mode and local HTTP gateway
 - JSONL observability + decision/audit logs
 - tamper-evident execution receipts and replay capsules
+- terminal color output for doctor checks and error messages; typo suggestions for unknown commands
 
 >Reference projects: 
 >TinyClaw by `jlia0` [tyniclaw](https://github.com/jlia0/tinyclaw) and original inspiration: [zeroclaw](https://github.com/zeroclaw-labs/zeroclaw) from `zeroclaw-labs`.
@@ -38,25 +40,42 @@ Generate starter config (skips if `zigclaw.toml` already exists):
 zig-out/bin/zigclaw init
 ```
 
+Zero-config quick start (auto-detects `OPENAI_API_KEY`):
+```sh
+export OPENAI_API_KEY=sk-...
+zig-out/bin/zigclaw chat
+```
+
+One-shot query:
+```sh
+zig-out/bin/zigclaw chat "Summarize README.md"
+```
+
+Stdin pipe:
+```sh
+echo "What does this file do?" | zig-out/bin/zigclaw chat
+```
+
+Override model or preset at runtime:
+```sh
+zig-out/bin/zigclaw chat --model gpt-4.1 --preset dev "Write a test"
+```
+
 Run with local deterministic provider (no network):
 ```sh
 zig-out/bin/zigclaw agent --message "hello" --config zigclaw.toml
 ```
 
-Run in interactive mode:
-```sh
-zig-out/bin/zigclaw agent --interactive --config zigclaw.toml
-```
-
 ## CLI Commands
 
-Command list is taken from `src/main.zig:usage()`.
+Use `zigclaw --help` for a grouped overview, or `zigclaw --help-all` for the full flat list.
 
 ```text
 zigclaw version [--json]
 zigclaw doctor [--config zigclaw.toml] [--json]
 zigclaw setup
 zigclaw update [--check] [--url <manifest-url>] [--json]
+zigclaw chat ["message"] [--agent id] [--model m] [--preset p] [--config zigclaw.toml] [--json] [--verbose]
 zigclaw run summary --request-id <id> [--config zigclaw.toml] [--json]
 zigclaw ops summary [--format text|json] [--limit N] [--config zigclaw.toml]
 zigclaw ops watch [--format text|json] [--limit N] [--poll-ms N] [--iterations N] [--config zigclaw.toml]
@@ -64,10 +83,10 @@ zigclaw vault set <name> [--vault <path>] [--json]
 zigclaw vault get <name> [--vault <path>] [--json]
 zigclaw vault list [--vault <path>] [--json]
 zigclaw vault delete <name> [--vault <path>] [--json]
-zigclaw init [--json]
-zigclaw init --quick [--json]
+zigclaw init [--full] [--json]
+zigclaw init --quick [--full] [--json]
 zigclaw init --guided
-zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--config zigclaw.toml] [--json]
+zigclaw agent --message "..." [--verbose] [--interactive] [--agent id] [--model m] [--preset p] [--config zigclaw.toml] [--json]
 zigclaw prompt dump --message "..." [--format json|text] [--out path] [--config zigclaw.toml]
 zigclaw prompt diff --a file --b file [--json]
 zigclaw tools list [--config zigclaw.toml]
@@ -162,7 +181,7 @@ workspace_root = "."
 max_request_bytes = 262144
 
 [providers.primary]
-kind = "stub"
+kind = "openai_compat"
 model = "gpt-4.1-mini"
 temperature = 0.2
 base_url = "https://api.openai.com/v1"
@@ -259,7 +278,9 @@ zig-out/bin/zigclaw prompt dump --message "hello" --format text --out /tmp/promp
 zig-out/bin/zigclaw prompt diff --a /tmp/prompt_a.txt --b /tmp/prompt_b.txt
 ```
 
-Agent orchestration supports optional static profiles (`[orchestration]`, `[agents.<id>]`) and a built-in `delegate_agent` tool when `delegate_to` is configured.
+The `chat` command is the primary user-facing entry point. It supports an interactive session, a one-shot positional argument (`zigclaw chat "message"`), a `--message` flag, and stdin piping. Interactive mode retains conversation history across turns (up to 20 user/assistant pairs), displays the active model in the prompt (`[gpt-4.1-mini] > `), prints token counts after each response, and supports slash commands: `/help`, `/model`, `/turns`, `/clear`.
+
+`agent` supports `--interactive` for the same REPL experience and `--message` for one-shot use. Agent orchestration supports optional static profiles (`[orchestration]`, `[agents.<id>]`) and a built-in `delegate_agent` tool when `delegate_to` is configured.
 Delegated child runs are attenuated with capability tokens (tool/write-path/network narrowing + optional turn/expiry constraints).
 
 ## Providers
@@ -275,6 +296,12 @@ api_key_env = "OPENAI_API_KEY"
 # optional vault-backed secret lookup
 # api_key_vault = "openai_api_key"
 ```
+
+**Zero-config auto-detection:** if `providers.primary.kind` is `stub` and `OPENAI_API_KEY` is set in the environment, `zigclaw chat` and `zigclaw agent` automatically switch to `openai_compat` with model `gpt-4.1-mini`.
+
+**Environment variable overrides** (between config-file values and CLI flags in precedence):
+- `ZIGCLAW_MODEL` - overrides `providers.primary.model`
+- `ZIGCLAW_BASE_URL` - overrides `providers.primary.base_url`
 
 Fixture/retry wrappers:
 ```toml

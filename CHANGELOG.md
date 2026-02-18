@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - 2026-02-18
+
+### Added
+- `zigclaw chat` command as the primary user-facing entry point:
+  - Interactive session, one-shot positional argument (`zigclaw chat "message"`), `--message` flag, and stdin pipe (`echo "msg" | zigclaw chat`).
+  - `--model`, `--preset`, `--agent`, `--json`, `--verbose` flags.
+  - Prompt shows active model name: `[gpt-4.1-mini] > `.
+  - Slash commands in interactive mode: `/help`, `/model`, `/turns`, `/clear`.
+- Persistent multi-turn conversation history in interactive REPL (both `chat` and `agent --interactive`):
+  - History retained across turns, capped at 40 messages (20 user/assistant pairs).
+  - All prior turns sent to the model on each new message for full context.
+  - Token usage printed to stderr after each response: `[N tokens in, N tokens out]`.
+- `AgentResult.Usage` struct accumulating `prompt_tokens`, `completion_tokens`, and `total_tokens` across all turns of a single run.
+- `RunOptions.prior_messages` field for injecting conversation history into `runLoop`.
+- Zero-config provider auto-detection: if `providers.primary.kind` is `stub` and `OPENAI_API_KEY` is set, `chat` and `agent` automatically switch to `openai_compat` with model `gpt-4.1-mini`.
+- `ZIGCLAW_MODEL` and `ZIGCLAW_BASE_URL` environment variable overrides (between config-file values and CLI flags in precedence).
+- `--model` and `--preset` runtime overrides on both `chat` and `agent` commands.
+- `--full` flag on `zigclaw init` for comprehensive config scaffold; default generates a minimal ~15-line config.
+- `--help-all` flag for flat full command listing.
+- Grouped `--help` output (Getting Started / Agent / Operations / Configuration sections).
+- Per-subcommand `--help` now calls the command's own `usageX()` instead of generic usage.
+- `unknownCommand()` with Levenshtein-distance typo suggestions (threshold: edit distance <= 2).
+- `src/util/term.zig`: ANSI color helpers respecting `NO_COLOR` and TTY detection.
+- Colorized doctor check levels (green/yellow/red) and error/hint output in CLI.
+- Interactive mode error hints for common failures: `ProviderApiKeyMissing`, `ProviderNetworkNotAllowed`, `ToolNotAllowed`, `Canceled`.
+- `chat` command added to shell completions (zsh, bash, fish) and onboarding next-step messaging.
+
+### Changed
+- `zigclaw init` default config now uses `kind = "openai_compat"` (previously `"stub"`).
+- `zigclaw init` onboarding next step updated from `zigclaw agent --message "hello"` to `zigclaw chat`.
+- `src/providers/openai_compat.zig`: raw JSON writing now uses `stream.beginWriteRaw()`/`endWriteRaw()` API instead of a separate raw writer parameter.
+
 ## [Unreleased] - 2026-02-16
 
 ### Added

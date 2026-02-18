@@ -55,6 +55,52 @@ When no `[orchestration]` section is configured (or `orchestration.agents` is em
 ZigClaw runs in single-agent mode. The agent is called `"default"` and uses the
 `active_preset` from `[capabilities]`.
 
+### chat - Primary Entry Point
+
+`zigclaw chat` is the recommended way to interact with the agent. It supports three
+input modes in one command:
+
+```sh
+zigclaw chat                          # interactive session
+zigclaw chat "Summarize README.md"    # one-shot with positional argument
+zigclaw chat --message "Summarize README.md"  # one-shot with flag
+echo "What does this do?" | zigclaw chat      # one-shot from stdin pipe
+```
+
+Runtime overrides (take precedence over config file):
+```sh
+zigclaw chat --model gpt-4.1 --preset dev "Write a test"
+zigclaw chat --agent planner          # select a specific agent profile
+zigclaw chat --json "Summarize"       # machine-readable output (one-shot only)
+```
+
+**Zero-config:** if `providers.primary.kind` is `stub` and `OPENAI_API_KEY` is set,
+`chat` auto-switches to `openai_compat` with model `gpt-4.1-mini`.
+
+### Interactive Session
+
+The interactive session (`zigclaw chat` with no message argument, or
+`zigclaw agent --interactive`) starts a REPL with conversation history retained
+across turns:
+
+- The prompt shows the active model: `[gpt-4.1-mini] > `
+- Each user message and assistant response is appended to a message list, capped at
+  40 entries (20 user/assistant pairs). All prior turns are sent to the model on
+  each new message, giving it full conversation context.
+- Token usage is printed to stderr after each response: `[N tokens in, N tokens out]`
+- Type `quit` or `exit` to leave.
+- If input exceeds the 4 KB line buffer the REPL prints `(input too long, try again)`
+  and discards the line.
+
+Slash commands available in the session:
+
+| Command | Effect |
+|---------|--------|
+| `/help` | List available commands |
+| `/model` | Show the active model name |
+| `/turns` | Show turn count and history size |
+| `/clear` | Reset conversation history |
+
 ### One-Shot Mode
 
 ```
@@ -82,16 +128,6 @@ zigclaw agent --message "List files" --verbose
 Stderr output includes request ID, model name, tool count, memory item count,
 system prompt size, per-turn finish reason, content byte count, tool call count,
 and token usage (prompt/completion/total).
-
-### Interactive Mode
-
-```
-zigclaw agent --interactive
-```
-
-This starts a REPL. Each line you type becomes a new agent run (independent context).
-Type `quit` or `exit` to leave. If input exceeds the 4 KB line buffer the REPL
-prints `(input too long, try again)` and discards the line.
 
 ### Capability Presets
 
@@ -251,7 +287,7 @@ If no presets are defined, a minimal `readonly` preset is synthesized with
 
 ```toml
 [providers.primary]
-kind = "stub"              # "stub" | "openai_compat"
+kind = "openai_compat"     # "stub" | "openai_compat"
 model = "gpt-4.1-mini"
 temperature = 0.2
 base_url = "https://api.openai.com/v1"
@@ -273,6 +309,15 @@ The `stub` provider returns canned responses without network access - useful for
 development and testing. `openai_compat` calls an OpenAI-compatible API. The API key
 resolution order is: inline `api_key`, then vault key `api_key_vault`, then env var
 named in `api_key_env`.
+
+**Zero-config auto-detection:** when `kind = "stub"` and `OPENAI_API_KEY` is set in
+the environment, `zigclaw chat` and `zigclaw agent` automatically switch to
+`openai_compat` with model `gpt-4.1-mini`. Useful for ad-hoc use without editing
+`zigclaw.toml`.
+
+**Environment variable overrides** apply between the config file and CLI flags:
+- `ZIGCLAW_MODEL` - overrides `providers.primary.model`
+- `ZIGCLAW_BASE_URL` - overrides `providers.primary.base_url`
 
 The fixtures wrapper records or replays provider responses for deterministic testing.
 The reliable wrapper retries failed provider calls with exponential backoff.
@@ -402,22 +447,35 @@ the first agent alphabetically becomes the leader. If the named leader is not fo
 
 ## 5. Common Workflows
 
-### One-Shot Agent Run
+### One-Shot Query
 
+```
+zigclaw chat "Explain the build system"
+```
+
+Returns the model's response to stdout. Add `--json` for machine-readable output
+including `request_id`, `turns`, and `content`.
+
+For legacy one-shot use via `agent`:
 ```
 zigclaw agent --message "Explain the build system"
 ```
 
-Returns the model's response to stdout with `request_id` and `turns` on the first
-two lines.
+Output includes `request_id=...` and `turns=...` on the first two lines.
 
 ### Interactive Session
 
 ```
-zigclaw agent --interactive
+zigclaw chat
 ```
 
-Each line is an independent agent run. Useful for exploratory conversations.
+Starts a persistent conversation. History is retained across turns (up to 20 pairs).
+Use `/clear` to reset, `/turns` to inspect history depth, `quit` to exit.
+
+For `agent`-style REPL (same behavior, no persistent history between sessions):
+```
+zigclaw agent --interactive
+```
 
 ### Multi-Agent Delegation
 
@@ -550,7 +608,8 @@ Use `zigclaw policy explain --tool <name>` to see the current allow/deny reasoni
 If the agent returns `ProviderNetworkNotAllowed`, the active preset has
 `allow_network = false` but the provider kind is `openai_compat` (which requires
 network access). Either switch to the `stub` provider or use a preset with
-`allow_network = true`.
+`allow_network = true`. In interactive mode, a hint is printed inline:
+`hint: The active preset disallows network access. Use --preset or edit zigclaw.toml`.
 
 For tool-level network denial, check the `tool.network` decision category in the
 decision log.

@@ -34,6 +34,7 @@ pub const RunOptions = struct {
     max_delegate_depth: usize = default_max_delegate_depth,
     parent_token: ?*const token_mod.CapabilityToken = null,
     cancel_check: ?CancelCheck = null,
+    prior_messages: ?[]const provider_mod.Message = null,
 };
 
 const ActiveAgent = struct {
@@ -45,6 +46,13 @@ pub const AgentResult = struct {
     content: []u8,
     turns: usize,
     attestation: ?Attestation = null,
+    usage: Usage = .{},
+
+    pub const Usage = struct {
+        prompt_tokens: u64 = 0,
+        completion_tokens: u64 = 0,
+        total_tokens: u64 = 0,
+    };
 
     pub fn deinit(self: *AgentResult, a: std.mem.Allocator) void {
         a.free(self.content);
@@ -74,18 +82,32 @@ pub fn run(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, messag
 }
 
 /// Interactive REPL mode: reads lines from stdin, runs the agent loop for each.
+/// Maintains conversation history across turns for multi-turn context.
 fn runInteractive(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig, opts: RunOptions) !void {
     var obuf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
     try ow.interface.writeAll("zigclaw interactive mode. Type a message, or 'quit' to exit.\n");
+    try ow.interface.writeAll("Type /help for available commands.\n");
     try ow.flush();
 
     const stdin = std.Io.File.stdin();
     var rbuf: [4096]u8 = undefined;
     var reader = stdin.reader(io, &rbuf);
 
+    // Conversation history persisted across turns
+    var history = std.array_list.Managed(provider_mod.Message).init(a);
+    defer {
+        for (history.items) |msg| {
+            if (msg.content) |c| a.free(c);
+        }
+        history.deinit();
+    }
+    const max_history_messages: usize = 40; // 20 user/assistant pairs
+
+    var turn_count: usize = 0;
+
     while (true) {
-        try ow.interface.writeAll("> ");
+        try ow.interface.print("[{s}] > ", .{cfg.raw.provider_primary.model});
         try ow.flush();
 
         const line = reader.interface.takeDelimiter('\n') catch |e| switch (e) {
@@ -103,11 +125,25 @@ fn runInteractive(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig,
         if (msg.len == 0) continue;
         if (std.mem.eql(u8, msg, "quit") or std.mem.eql(u8, msg, "exit")) return;
 
+        // Slash commands
+        if (msg.len > 0 and msg[0] == '/') {
+            if (handleSlashCommand(msg, cfg, a, &history, &turn_count, &ow.interface)) {
+                try ow.flush();
+                continue;
+            }
+        }
+
+        var run_opts = opts;
+        run_opts.prior_messages = if (history.items.len > 0) history.items else null;
+
         const rid = trace.newRequestId(io);
-        var result = runLoop(a, io, cfg, msg, rid.slice(), opts) catch |e| {
-            var ebuf: [4096]u8 = undefined;
-            var ew = std.Io.File.stderr().writer(io, &ebuf);
+        var result = runLoop(a, io, cfg, msg, rid.slice(), run_opts) catch |e| {
+            var ebuf2: [4096]u8 = undefined;
+            var ew = std.Io.File.stderr().writer(io, &ebuf2);
             try ew.interface.print("error: {s}\n", .{@errorName(e)});
+            if (interactiveErrorHint(e)) |hint| {
+                try ew.interface.print("hint: {s}\n", .{hint});
+            }
             try ew.flush();
             continue;
         };
@@ -115,7 +151,87 @@ fn runInteractive(a: std.mem.Allocator, io: std.Io, cfg: config.ValidatedConfig,
 
         try ow.interface.print("{s}\n", .{result.content});
         try ow.flush();
+
+        // Token usage on stderr (dim)
+        if (result.usage.total_tokens > 0) {
+            var ebuf2: [256]u8 = undefined;
+            var ew = std.Io.File.stderr().writer(io, &ebuf2);
+            try ew.interface.print("[{d} tokens in, {d} tokens out]\n", .{
+                result.usage.prompt_tokens,
+                result.usage.completion_tokens,
+            });
+            try ew.flush();
+        }
+
+        // Persist user + assistant messages into history
+        try history.append(.{ .role = .user, .content = try a.dupe(u8, msg) });
+        try history.append(.{ .role = .assistant, .content = try a.dupe(u8, result.content) });
+        turn_count += 1;
+
+        // Cap history to avoid unbounded growth
+        while (history.items.len > max_history_messages) {
+            const removed = history.orderedRemove(0);
+            if (removed.content) |c| a.free(c);
+        }
     }
+}
+
+fn handleSlashCommand(
+    msg: []const u8,
+    cfg: config.ValidatedConfig,
+    alloc: std.mem.Allocator,
+    history: *std.array_list.Managed(provider_mod.Message),
+    turn_count: *usize,
+    writer: anytype,
+) bool {
+    if (std.mem.eql(u8, msg, "/quit") or std.mem.eql(u8, msg, "/exit")) {
+        writer.writeAll("Use 'quit' or 'exit' to leave.\n") catch {};
+        return true;
+    }
+    if (std.mem.eql(u8, msg, "/help")) {
+        writer.writeAll(
+            \\Available commands:
+            \\  /help   - show this help
+            \\  /model  - show current model
+            \\  /turns  - show conversation turn count
+            \\  /clear  - reset conversation history
+            \\  quit    - exit interactive mode
+            \\
+        ) catch {};
+        return true;
+    }
+    if (std.mem.eql(u8, msg, "/model")) {
+        writer.print("model: {s}\n", .{cfg.raw.provider_primary.model}) catch {};
+        return true;
+    }
+    if (std.mem.eql(u8, msg, "/turns")) {
+        writer.print("turns: {d} ({d} messages in history)\n", .{ turn_count.*, history.items.len }) catch {};
+        return true;
+    }
+    if (std.mem.eql(u8, msg, "/clear")) {
+        for (history.items) |m| {
+            if (m.content) |c| alloc.free(c);
+        }
+        history.clearRetainingCapacity();
+        turn_count.* = 0;
+        writer.writeAll("conversation history cleared.\n") catch {};
+        return true;
+    }
+    // Unknown command
+    writer.print("unknown command: {s}. Type /help for available commands.\n", .{msg}) catch {};
+    return true;
+}
+
+fn interactiveErrorHint(err: anyerror) ?[]const u8 {
+    if (err == error.ProviderApiKeyMissing)
+        return "Set OPENAI_API_KEY or configure api_key_vault in zigclaw.toml";
+    if (err == error.ProviderNetworkNotAllowed)
+        return "The active preset disallows network access. Use --preset or edit zigclaw.toml";
+    if (err == error.ToolNotAllowed)
+        return "Tool denied by active policy preset. Check capabilities in zigclaw.toml";
+    if (err == error.Canceled)
+        return "Request was canceled";
+    return null;
 }
 
 /// Core iterative agent loop. Reusable from both CLI and gateway.
@@ -310,7 +426,15 @@ pub fn runLoop(
         try messages.append(.{ .role = .system, .content = mem_text });
     }
 
+    // Insert prior conversation history (multi-turn support)
+    if (opts.prior_messages) |history| {
+        for (history) |msg| try messages.append(msg);
+    }
+
     try messages.append(.{ .role = .user, .content = message });
+
+    // Accumulate token usage across turns
+    var total_usage: AgentResult.Usage = .{};
 
     // Iterative loop
     var turn: usize = 0;
@@ -424,6 +548,10 @@ pub fn runLoop(
             },
         }) catch {};
 
+        total_usage.prompt_tokens += resp.usage.prompt_tokens;
+        total_usage.completion_tokens += resp.usage.completion_tokens;
+        total_usage.total_tokens += resp.usage.total_tokens;
+
         if (opts.verbose) {
             verboseLog(io, "[verbose] turn={d} finish_reason={s} content_bytes={d} tool_calls={d} tokens={d}/{d}/{d}\n", .{
                 turn,                     @tagName(resp.finish_reason), resp.content.len,        resp.tool_calls.len,
@@ -461,6 +589,7 @@ pub fn runLoop(
                 .content = try a.dupe(u8, resp.content),
                 .turns = turn + 1,
                 .attestation = attestation,
+                .usage = total_usage,
             };
         }
 
@@ -693,6 +822,7 @@ pub fn runLoop(
         .content = try a.dupe(u8, "Agent reached maximum number of turns without completing."),
         .turns = max_agent_turns,
         .attestation = attestation,
+        .usage = total_usage,
     };
 }
 

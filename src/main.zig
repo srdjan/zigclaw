@@ -104,6 +104,13 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         var validated = try app_c.loadConfig(cfg_path);
         defer validated.deinit(a);
 
+        // Zero-config: auto-switch stub to openai_compat when API key is present
+        applyEnvDefaults(&validated);
+
+        // Env var overrides (lower priority than CLI flags)
+        applyEnvOverrides(&validated);
+
+        // CLI flags take highest priority
         if (model_override) |m| validated.raw.provider_primary.model = m;
         if (preset_override) |p| validated.raw.capabilities.active_preset = p;
 
@@ -676,6 +683,13 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         var validated = try app.loadConfig(cfg_path);
         defer validated.deinit(a);
 
+        // Zero-config: auto-switch stub to openai_compat when API key is present
+        applyEnvDefaults(&validated);
+
+        // Env var overrides (lower priority than CLI flags)
+        applyEnvOverrides(&validated);
+
+        // CLI flags take highest priority
         if (model_override) |m| validated.raw.provider_primary.model = m;
         if (preset_override) |p| validated.raw.capabilities.active_preset = p;
 
@@ -2547,6 +2561,33 @@ fn errorHint(cmd: []const u8, err: anyerror) ?[]const u8 {
     if (err == error.InvalidCapsule) return "replay capsule format is invalid.";
     if (err == error.EventIndexOutOfBounds) return "event index is out of range for this receipt.";
     return null;
+}
+
+/// When the config uses the stub provider and OPENAI_API_KEY is set in the
+/// environment, auto-switch to openai_compat so that `zigclaw chat` works
+/// with zero configuration.
+fn applyEnvDefaults(validated: *config_mod.ValidatedConfig) void {
+    if (validated.raw.provider_primary.kind != .stub) return;
+    if (std.c.getenv("OPENAI_API_KEY")) |k| {
+        if (std.mem.span(k).len > 0) {
+            validated.raw.provider_primary.kind = .openai_compat;
+            validated.raw.provider_primary.model = "gpt-4.1-mini";
+            validated.raw.provider_primary.base_url = "https://api.openai.com/v1";
+        }
+    }
+}
+
+/// Apply ZIGCLAW_MODEL and ZIGCLAW_BASE_URL environment variable overrides.
+/// These sit between config-file values and CLI flags in precedence.
+fn applyEnvOverrides(validated: *config_mod.ValidatedConfig) void {
+    if (std.c.getenv("ZIGCLAW_MODEL")) |m| {
+        const s = std.mem.span(m);
+        if (s.len > 0) validated.raw.provider_primary.model = s;
+    }
+    if (std.c.getenv("ZIGCLAW_BASE_URL")) |u| {
+        const s = std.mem.span(u);
+        if (s.len > 0) validated.raw.provider_primary.base_url = s;
+    }
 }
 
 fn scaffoldProject(a: std.mem.Allocator, io: std.Io, as_json: bool, full: bool) !void {

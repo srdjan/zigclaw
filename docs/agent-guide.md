@@ -356,7 +356,7 @@ allow_write_paths = ["./.zigclaw", "./tmp"]
 
 - `active_preset` - Names the default preset. Defaults to `"readonly"`.
 - `tools` - List of tool names the agent is allowed to call. Each name must match a
-  `.toml` manifest in `tools.plugin_dir`.
+  `.toml` manifest in `tools.plugin_dir` (built-in) or `tools.external_dir` (external).
 - `allow_network` - Whether tools and the provider may make network requests.
 - `allow_write_paths` - Directories the agent may write to. Paths are resolved
   relative to `security.workspace_root`.
@@ -688,9 +688,33 @@ If a tool call is rejected, verify:
 
 1. The `active_preset` in `[capabilities]` matches the intended preset.
 2. The tool name appears in that preset's `tools` array.
-3. The tool manifest exists in `tools.plugin_dir` (default `./zig-out/bin/<name>.toml`).
+3. The tool manifest exists in `tools.plugin_dir` (built-in) or `tools.external_dir` (external).
+4. If the tool is external (not in the compiled registry), `tools.filter.allow_external` must be `true` and the tool must be in `external_allow_list` (or the list must be empty).
 
 Use `zigclaw policy explain --tool <name>` to see the current allow/deny reasoning.
+
+### External Tool Denied
+
+If a tool returns `ExternalToolDenied`, the tool is not in the built-in registry and the
+external tool filter is blocking it. External tools are denied by default.
+
+To allow specific external tools:
+```toml
+[tools.filter]
+allow_external = true
+external_allow_list = ["my_tool"]
+```
+
+To allow all external tools (less restrictive):
+```toml
+[tools.filter]
+allow_external = true
+external_allow_list = []
+```
+
+External tool manifests and binaries should be placed in `tools.external_dir` (default
+`./ext-tools`). The `tool.external_filter` decision category in the decision log shows
+whether an external tool was allowed or denied and why.
 
 ### Network Denied
 
@@ -735,6 +759,7 @@ Decision events are written to `.zigclaw/decisions.jsonl`. Each line is a JSON o
 Decision categories logged throughout the system:
 
 - `tool.allow` - Whether a tool call was permitted by the preset.
+- `tool.external_filter` - Whether an external (non-built-in) tool was allowed by `[tools.filter]`.
 - `tool.network` - Whether a tool's network access was permitted.
 - `provider.network` - Whether the provider was allowed to make network calls.
 - `provider.select` - Which provider and model were selected for the run. Reason
@@ -799,6 +824,8 @@ from the original file are preserved through the round-trip. Common warnings:
 - `unknown delegate target` - An agent's `delegate_to` references a nonexistent agent.
 - `unknown named provider` - An agent's `provider` references a `[providers.NAME]`
   section that does not exist.
+- `built-in tool in external_allow_list` - A tool in `tools.filter.external_allow_list` is already in the built-in registry (redundant, as built-in tools bypass the external filter).
+- `tool not referenced by any preset` - A tool in `tools.filter.external_allow_list` does not appear in any capability preset's `tools` array (dead entry).
 
 ### Verifying Policy Hash
 

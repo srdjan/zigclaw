@@ -229,6 +229,8 @@ fn interactiveErrorHint(err: anyerror) ?[]const u8 {
         return "The active preset disallows network access. Use --preset or edit zigclaw.toml";
     if (err == error.ToolNotAllowed)
         return "Tool denied by active policy preset. Check capabilities in zigclaw.toml";
+    if (err == error.ExternalToolDenied)
+        return "External tool denied. Set tools.filter.allow_external=true or add it to external_allow_list in zigclaw.toml";
     if (err == error.Canceled)
         return "Request was canceled";
     return null;

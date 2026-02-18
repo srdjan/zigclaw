@@ -936,7 +936,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         defer validated.deinit(a);
 
         if (std.mem.eql(u8, sub, "list")) {
-            const json = try @import("tools/manifest_runtime.zig").listToolsJsonAlloc(a, io, validated.raw.tools.plugin_dir);
+            const json = try @import("tools/manifest_runtime.zig").listToolsJsonAlloc(a, io, validated.raw.tools.plugin_dir, validated.raw.tools.external_dir);
             defer a.free(json);
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
@@ -948,7 +948,7 @@ fn run(init: std.process.Init, argv: []const [:0]const u8) !void {
         if (std.mem.eql(u8, sub, "describe")) {
             if (argv.len < 4) return error.InvalidArgs;
             const tool: []const u8 = argv[3];
-            const json = try @import("tools/manifest_runtime.zig").describeToolJsonAlloc(a, io, validated.raw.tools.plugin_dir, tool);
+            const json = try @import("tools/manifest_runtime.zig").describeToolJsonAlloc(a, io, validated.raw.tools.plugin_dir, validated.raw.tools.external_dir, tool);
             defer a.free(json);
             var obuf: [4096]u8 = undefined;
             var ow = std.Io.File.stdout().writer(io, &obuf);
@@ -2590,6 +2590,7 @@ fn errorHint(cmd: []const u8, err: anyerror) ?[]const u8 {
     if (err == error.DuplicateRequestId) return "request id already exists; use a unique --request-id.";
     if (err == error.ToolNotAllowed) return "tool denied by policy; run `zigclaw policy explain --tool <name>`.";
     if (err == error.ToolNetworkNotAllowed) return "tool requires network but active preset denies network; choose a different preset.";
+    if (err == error.ExternalToolDenied) return "external tool denied by tools.filter; set tools.filter.allow_external=true or add the tool to external_allow_list.";
     if (err == error.InvalidToolArgs) return "tool args do not match schema; run `zigclaw tools describe <tool>`.";
     if (err == error.UnregisteredTool) return "tool is not in compiled registry and tools.registry.strict=true; adjust presets or registry.";
     if (err == error.NetworkToolRequiresPresetNetwork) return "preset contains a network tool while allow_network=false.";

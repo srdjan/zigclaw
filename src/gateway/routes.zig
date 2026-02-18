@@ -142,7 +142,7 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
     }
 
     if (std.mem.eql(u8, req.method, "GET") and std.mem.eql(u8, path, "/v1/tools")) {
-        const tools_json = try tools_rt.listToolsJsonAlloc(a, io, cfg.raw.tools.plugin_dir);
+        const tools_json = try tools_rt.listToolsJsonAlloc(a, io, cfg.raw.tools.plugin_dir, cfg.raw.tools.external_dir);
         defer a.free(tools_json);
         var parsed_tools = try std.json.parseFromSlice(std.json.Value, a, tools_json, .{});
         defer parsed_tools.deinit();
@@ -155,7 +155,7 @@ pub fn handle(a: std.mem.Allocator, io: std.Io, app: *App, cfg: config.Validated
     if (std.mem.eql(u8, req.method, "GET") and std.mem.startsWith(u8, path, "/v1/tools/")) {
         const tool = path["/v1/tools/".len..];
         if (tool.len == 0) return try jsonError(a, 400, request_id, "tool name required");
-        const manifest_json = try tools_rt.describeToolJsonAlloc(a, io, cfg.raw.tools.plugin_dir, tool);
+        const manifest_json = try tools_rt.describeToolJsonAlloc(a, io, cfg.raw.tools.plugin_dir, cfg.raw.tools.external_dir, tool);
         defer a.free(manifest_json);
         const body = try jsonWithEmbeddedJsonFieldAlloc(a, request_id, "manifest", manifest_json);
         return .{ .status = 200, .body = body };

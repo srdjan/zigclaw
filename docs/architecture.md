@@ -38,6 +38,8 @@ This document reflects the current implementation in `src/`.
 - Manifest `native = false` (default): execute with `wasmtime` and mapped dirs.
 - Manifest `native = true`: execute host binary directly.
 - Capability policy controls allowed tool names and writable path mounts.
+- Built-in tools resolve from `tools.plugin_dir`, external tools from `tools.external_dir`.
+- Provider-level external tool filter (`[tools.filter]`) defaults to denying all external tools, requiring explicit opt-in via `allow_external` and optional `external_allow_list`.
 
 ## Provider boundary
 - Provider selection and wrappers are built from config in `src/providers/factory.zig`.

@@ -55,6 +55,7 @@ Current typed schema in `src/config.zig` includes:
 - `[memory.primitives]`
 - `[tools]`
 - `[tools.registry]`
+- `[tools.filter]`
 - `[queue]`
 - `[automation]`
 - `[persistence.git]`

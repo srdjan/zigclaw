@@ -101,8 +101,40 @@ pub fn run(
 
     if (!allowed) return error.ToolNotAllowed;
 
+    // Provider-level external tool filter
+    const is_builtin = registry_mod.isBuiltin(tool);
+    if (!is_builtin) {
+        const filter = cfg.raw.tools.filter;
+        const external_allowed = blk: {
+            if (!filter.allow_external) break :blk false;
+            if (filter.external_allow_list.len == 0) break :blk true;
+            break :blk for (filter.external_allow_list) |name| {
+                if (std.mem.eql(u8, name, tool)) break true;
+            } else false;
+        };
+
+        decisions.logAndRecord(a, .{
+            .ts_unix_ms = decision_log.nowUnixMs(io),
+            .request_id = request_id,
+            .prompt_hash = meta.prompt_hash,
+            .decision = "tool.external_filter",
+            .subject = tool,
+            .allowed = external_allowed,
+            .reason = if (external_allowed)
+                "allowed: external tool permitted by tools.filter config"
+            else
+                "denied: external tool not allowed by tools.filter config",
+            .policy_hash = cfg.policy.policyHash(),
+        }, meta.ledger);
+
+        if (!external_allowed) return error.ExternalToolDenied;
+    }
+
+    // Resolve tool directory: built-in from plugin_dir, external from external_dir
+    const tool_dir = if (is_builtin) cfg.raw.tools.plugin_dir else cfg.raw.tools.external_dir;
+
     // Locate manifest and load it
-    const manifest_path = try std.fmt.allocPrint(a, "{s}/{s}.toml", .{ cfg.raw.tools.plugin_dir, tool });
+    const manifest_path = try std.fmt.allocPrint(a, "{s}/{s}.toml", .{ tool_dir, tool });
     defer a.free(manifest_path);
     var owned = try manifest_mod.loadManifest(a, io, manifest_path);
     defer owned.deinit(a);
@@ -207,12 +239,12 @@ pub fn run(
 
     if (m.native) {
         // Native tool: run the host binary directly
-        const plugin_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ cfg.raw.tools.plugin_dir, tool });
+        const plugin_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ tool_dir, tool });
         try alloc_strings.append(plugin_path);
         try argv.append(plugin_path);
     } else {
         // WASI plugin: run through wasmtime with preopened directories
-        const plugin_path = try std.fmt.allocPrint(a, "{s}/{s}.wasm", .{ cfg.raw.tools.plugin_dir, tool });
+        const plugin_path = try std.fmt.allocPrint(a, "{s}/{s}.wasm", .{ tool_dir, tool });
         try alloc_strings.append(plugin_path);
 
         try argv.append(cfg.raw.tools.wasmtime_path);

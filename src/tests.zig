@@ -3499,3 +3499,147 @@ test "levenshtein distance basic cases" {
     try std.testing.expectEqual(@as(usize, 3), str_util.levenshtein("", "abc"));
     try std.testing.expectEqual(@as(usize, 0), str_util.levenshtein("", ""));
 }
+
+// ----- External tool filter tests -----
+
+test "runner denies external tool by default" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    // Inject a non-built-in tool into the policy's allowed set so it passes the
+    // capability preset check but hits the external filter.
+    try vc.policy.plan.allowed_tools.put("custom_ext", {});
+
+    // Default filter: allow_external=false
+    try std.testing.expectError(error.ExternalToolDenied, tools_runner.run(
+        a, io, vc, "req_ext_1", "custom_ext", "{}", .{},
+    ));
+}
+
+test "runner allows built-in tool with filter off" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    // "echo" is built-in and in the "dev" preset. With allow_external=false,
+    // built-in tools should NOT be blocked by the external filter.
+    // They will fail later (manifest not found in test env), which is fine -
+    // the point is that ExternalToolDenied is NOT returned.
+    const result = tools_runner.run(a, io, vc, "req_ext_2", "echo", "{}", .{});
+    if (result) |_| {
+        // If it somehow succeeds, that's fine too
+    } else |err| {
+        try std.testing.expect(err != error.ExternalToolDenied);
+    }
+}
+
+test "runner allows listed external tool" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    try vc.policy.plan.allowed_tools.put("custom_ext", {});
+    vc.raw.tools.filter.allow_external = true;
+    // Heap-allocate the allow list so freeConfigStrings can safely free it.
+    const ext_name = try a.dupe(u8, "custom_ext");
+    const ext_list = try a.alloc([]const u8, 1);
+    ext_list[0] = ext_name;
+    vc.raw.tools.filter.external_allow_list = ext_list;
+
+    // Should NOT return ExternalToolDenied. It will fail at manifest loading
+    // (no file on disk), which is the expected next stage.
+    const result = tools_runner.run(a, io, vc, "req_ext_3", "custom_ext", "{}", .{});
+    if (result) |_| {} else |err| {
+        try std.testing.expect(err != error.ExternalToolDenied);
+    }
+}
+
+test "runner denies unlisted external tool" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    var vc = try config.loadAndValidate(a, io, "zigclaw.toml");
+    defer vc.deinit(a);
+
+    try vc.policy.plan.allowed_tools.put("custom_ext", {});
+    vc.raw.tools.filter.allow_external = true;
+    // Heap-allocate the allow list so freeConfigStrings can safely free it.
+    const ext_name = try a.dupe(u8, "other_tool");
+    const ext_list = try a.alloc([]const u8, 1);
+    ext_list[0] = ext_name;
+    vc.raw.tools.filter.external_allow_list = ext_list;
+
+    try std.testing.expectError(error.ExternalToolDenied, tools_runner.run(
+        a, io, vc, "req_ext_4", "custom_ext", "{}", .{},
+    ));
+}
+
+test "config warns on built-in in external_allow_list" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
+
+    const tio = try makeTestIo(a);
+    defer destroyTestIo(a, tio.threaded);
+    const io = tio.io;
+
+    const cfg_path = "tests/.tmp_ext_allow_builtin.toml";
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    const content =
+        \\config_version = 1
+        \\
+        \\[capabilities]
+        \\active_preset = "dev"
+        \\
+        \\[capabilities.presets.dev]
+        \\tools = ["echo", "fs_read"]
+        \\allow_network = true
+        \\allow_write_paths = []
+        \\
+        \\[tools.filter]
+        \\allow_external = true
+        \\external_allow_list = ["echo"]
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = content });
+
+    var vc = try config.loadAndValidate(a, io, cfg_path);
+    defer vc.deinit(a);
+
+    var found_warning = false;
+    for (vc.warnings) |w| {
+        if (std.mem.indexOf(u8, w.message, "built-in tool") != null) {
+            found_warning = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_warning);
+}

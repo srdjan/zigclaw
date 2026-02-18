@@ -45,6 +45,7 @@ fn isPermanentError(err: anyerror) bool {
         error.ToolNotAllowed,
         error.InvalidToolArgs,
         error.ToolNetworkNotAllowed,
+        error.ExternalToolDenied,
         error.InvalidJson,
         error.InvalidResponse,
         => true,

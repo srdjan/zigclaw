@@ -39,6 +39,7 @@ allow_write_paths = []
 
 ## Implemented
 - Tool allow/deny: `tools_runner.run` checks `cfg.policy.isToolAllowed(...)`.
+- External tool filter: non-built-in tools are checked against `[tools.filter]` config. External tools are denied by default (`allow_external = false`). When enabled, an optional `external_allow_list` restricts which external tools may execute. This layers additively with preset enforcement.
 - Network-sensitive tool manifest gate: `requires_network = true` requires `allow_network = true`.
 - Provider network gate: `openai_compat` is denied when `allow_network = false`.
 - Mount decisions are explainable (`policy explain --mount ...`).

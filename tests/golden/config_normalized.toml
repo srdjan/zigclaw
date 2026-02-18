@@ -72,9 +72,14 @@ strict_schema = true
 [tools]
 wasmtime_path = "wasmtime"
 plugin_dir = "./zig-out/bin"
+external_dir = "./ext-tools"
 
 [tools.registry]
 strict = false
+
+[tools.filter]
+allow_external = false
+external_allow_list = []
 
 [queue]
 dir = "./.zigclaw/queue"

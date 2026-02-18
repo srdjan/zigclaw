@@ -21,7 +21,7 @@
 ## Decision Categories Observed in Code
 
 ## Implemented
-- Tool policy: `tool.allow`, `tool.network`
+- Tool policy: `tool.allow`, `tool.external_filter`, `tool.network`
 - Provider policy: `provider.network`, `provider.select`, `provider.fixtures`, `provider.reliable`
 - Memory policy: `memory.backend`, `memory.recall`
 - Gateway policy: `gateway.request_bytes`, `gateway.auth`, `gateway.throttle`

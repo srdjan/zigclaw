@@ -16,6 +16,10 @@ pub fn contains(tool_name: []const u8) bool {
     return find(tool_name) != null;
 }
 
+pub fn isBuiltin(tool_name: []const u8) bool {
+    return contains(tool_name);
+}
+
 pub fn find(tool_name: []const u8) ?Entry {
     for (entries) |entry| {
         if (std.mem.eql(u8, entry.tool_name, tool_name)) return entry;

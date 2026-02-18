@@ -3,7 +3,7 @@
 ZigClaw is a local-first Zig agent runtime with:
 - `zigclaw chat` as the primary entry point: interactive session, one-shot, or stdin pipe; multi-turn context retained across turns
 - config-driven capability presets and compiled policy hash; JSON Schema generation, semantic diff, and "did you mean?" typo suggestions for config keys
-- tool execution via plugin manifests (WASI plugins and native plugins)
+- tool execution via plugin manifests (WASI plugins and native plugins) with provider-level external tool filtering
 - provider abstraction (`stub`, `openai_compat`) with fixture and retry wrappers; zero-config auto-detection when `OPENAI_API_KEY` is present; named providers for per-agent multi-model orchestration
 - setup wizard, encrypted vault secrets, and in-place self-update command
 - queue worker mode and local HTTP gateway
@@ -247,9 +247,14 @@ strict_schema = true
 [tools]
 wasmtime_path = "wasmtime"
 plugin_dir = "./zig-out/bin"
+external_dir = "./ext-tools"
 
 [tools.registry]
 strict = false
+
+[tools.filter]
+allow_external = false
+external_allow_list = []
 
 [queue]
 dir = "./.zigclaw/queue"
@@ -307,6 +312,16 @@ zigclaw tools run echo --args '{"text":"hi"}' --config zigclaw.toml
 Execution model:
 - `native = false` (default): run `wasmtime --mapdir ... <tool>.wasm`
 - `native = true`: run host binary `<plugin_dir>/<tool>`
+
+Built-in tools are resolved from `tools.plugin_dir` (default `./zig-out/bin`). External (user-supplied) tools are resolved from `tools.external_dir` (default `./ext-tools`). External tools are denied by default and require explicit opt-in via `[tools.filter]`:
+
+```toml
+[tools.filter]
+allow_external = true
+external_allow_list = ["my_custom_tool"]  # empty = allow all external tools
+```
+
+This layers additively with capability presets: both the preset and the filter must allow a tool for it to execute. See `docs/p3-tools.md` for details.
 
 ## Prompt and Agent Loop
 
@@ -538,6 +553,7 @@ Both sinks support size-based rotation.
 
 ## Project Layout
 - `src/`: core runtime (`config`, `policy`, `agent`, `providers`, `tools`, `queue`, `gateway`, `attestation`, `replay`, `vault`, `update`)
-- `plugins/`: example tools + SDK
+- `plugins/`: built-in tool source code (compiled to `zig-out/bin/`)
+- `ext-tools/`: user-supplied external tools (pre-built binaries/WASI + `tool.toml` manifests)
 - `docs/`: implementation-phase and architecture docs
 - `tests/`: golden files and fixtures

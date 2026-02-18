@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased] - 2026-02-18
 
 ### Added
+- Provider-level external tool filtering:
+  - New `[tools.filter]` config section with `allow_external` (default `false`) and `external_allow_list` fields. External tools are denied by default, requiring explicit opt-in.
+  - New `tools.external_dir` config field (default `./ext-tools`) for user-supplied external tool manifests and binaries, separate from the built-in `tools.plugin_dir`.
+  - `isBuiltin()` function in the tool registry to distinguish built-in tools from external ones.
+  - External tool filter enforcement in the tool runner with `tool.external_filter` decision log events.
+  - `error.ExternalToolDenied` with actionable error hints in CLI, agent loop, and non-retryable error classification.
+  - Config validation warns when a built-in tool appears in `external_allow_list` (redundant) or when a listed tool is not referenced by any capability preset (dead entry).
+  - `tools list` and `tools describe` now scan both `plugin_dir` and `external_dir`.
+  - JSON schema, normalized TOML output, and debug print updated to include new fields.
 - Config tooling improvements:
   - `zigclaw config schema` command: generates a JSON Schema from the `Config` struct for editor autocompletion (VS Code Even Better TOML, etc.).
   - `zigclaw config diff --a <file1> --b <file2> [--json]` command: semantic diff between two TOML config files, reporting added, removed, and changed keys with old/new values.

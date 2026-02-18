@@ -95,11 +95,18 @@ pub const ReplayConfig = struct {
 pub const ToolsConfig = struct {
     wasmtime_path: []const u8 = "wasmtime",
     plugin_dir: []const u8 = "./zig-out/bin",
+    external_dir: []const u8 = "./ext-tools",
     registry: ToolsRegistryConfig = .{},
+    filter: ToolsFilterConfig = .{},
 };
 
 pub const ToolsRegistryConfig = struct {
     strict: bool = false,
+};
+
+pub const ToolsFilterConfig = struct {
+    allow_external: bool = false,
+    external_allow_list: []const []const u8 = &.{},
 };
 
 pub const QueueConfig = struct {
@@ -260,10 +267,15 @@ pub const ValidatedConfig = struct {
             @tagName(sys.gateway.rate_limit_store),
             sys.gateway.rate_limit_dir,
         });
-        try w.print("  tools.wasmtime_path={s} plugin_dir={s} registry.strict={s}\n", .{
+        try w.print("  tools.wasmtime_path={s} plugin_dir={s} external_dir={s} registry.strict={s}\n", .{
             sys.tools.wasmtime_path,
             sys.tools.plugin_dir,
+            sys.tools.external_dir,
             if (sys.tools.registry.strict) "true" else "false",
+        });
+        try w.print("  tools.filter.allow_external={s} external_allow_list={d}\n", .{
+            if (sys.tools.filter.allow_external) "true" else "false",
+            sys.tools.filter.external_allow_list.len,
         });
         try w.print("  queue.dir={s} poll_ms={d} max_retries={d} retry_backoff_ms={d} retry_jitter_pct={d}\n", .{
             sys.queue.dir,
@@ -631,6 +643,10 @@ pub const ValidatedConfig = struct {
         try w.writeAll("plugin_dir = ");
         try writeTomlString(w, self.raw.tools.plugin_dir);
         try writeInlineComment(w, cm, "tools.plugin_dir");
+        try w.writeAll("\n");
+        try w.writeAll("external_dir = ");
+        try writeTomlString(w, self.raw.tools.external_dir);
+        try writeInlineComment(w, cm, "tools.external_dir");
         try w.writeAll("\n\n");
 
         // [tools.registry]
@@ -638,6 +654,17 @@ pub const ValidatedConfig = struct {
         try w.writeAll("[tools.registry]\n");
         try w.print("strict = {s}", .{if (self.raw.tools.registry.strict) "true" else "false"});
         try writeInlineComment(w, cm, "tools.registry.strict");
+        try w.writeAll("\n\n");
+
+        // [tools.filter]
+        try writeSectionComment(w, cm, "tools.filter");
+        try w.writeAll("[tools.filter]\n");
+        try w.print("allow_external = {s}", .{if (self.raw.tools.filter.allow_external) "true" else "false"});
+        try writeInlineComment(w, cm, "tools.filter.allow_external");
+        try w.writeAll("\n");
+        try w.writeAll("external_allow_list = ");
+        try writeTomlStringArray(w, self.raw.tools.filter.external_allow_list);
+        try writeInlineComment(w, cm, "tools.filter.external_allow_list");
         try w.writeAll("\n\n");
 
         // [queue]
@@ -1193,6 +1220,18 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
             cfg.tools.registry.strict = try coerceBool(v);
             continue;
         }
+        if (std.mem.eql(u8, k, "tools.external_dir")) {
+            cfg.tools.external_dir = try coerceStringDup(a, v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "tools.filter.allow_external")) {
+            cfg.tools.filter.allow_external = try coerceBool(v);
+            continue;
+        }
+        if (std.mem.eql(u8, k, "tools.filter.external_allow_list")) {
+            cfg.tools.filter.external_allow_list = try coerceStringArrayDup(a, v);
+            continue;
+        }
 
         if (std.mem.eql(u8, k, "queue.dir")) {
             cfg.queue.dir = try coerceStringDup(a, v);
@@ -1710,6 +1749,7 @@ fn buildTypedConfig(a: std.mem.Allocator, parsed: ParseResult) !BuildResult {
 
     try validatePresetToolsAgainstRegistry(a, cfg, &warns);
     try validateDelegationPresetSubsets(a, cfg, &warns);
+    try validateExternalAllowList(a, cfg, &warns);
 
     return .{ .cfg = cfg, .warnings = try warns.toOwnedSlice() };
 }
@@ -1805,6 +1845,45 @@ fn validateDelegationPresetSubsets(a: std.mem.Allocator, cfg: Config, warns: *st
     }
 }
 
+fn validateExternalAllowList(a: std.mem.Allocator, cfg: Config, warns: *std.array_list.Managed(Warning)) !void {
+    for (cfg.tools.filter.external_allow_list) |ext_tool| {
+        // Warn if a built-in tool appears in external_allow_list (redundant)
+        if (tools_registry.contains(ext_tool)) {
+            try warns.append(.{
+                .key_path = try a.dupe(u8, "tools.filter.external_allow_list"),
+                .message = try std.fmt.allocPrint(
+                    a,
+                    "'{s}' is a built-in tool; listing it in external_allow_list is redundant",
+                    .{ext_tool},
+                ),
+            });
+            continue;
+        }
+
+        // Warn if tool is not referenced by any capability preset (dead entry)
+        var referenced = false;
+        for (cfg.capabilities.presets) |preset| {
+            for (preset.tools) |t| {
+                if (std.mem.eql(u8, t, ext_tool)) {
+                    referenced = true;
+                    break;
+                }
+            }
+            if (referenced) break;
+        }
+        if (!referenced) {
+            try warns.append(.{
+                .key_path = try a.dupe(u8, "tools.filter.external_allow_list"),
+                .message = try std.fmt.allocPrint(
+                    a,
+                    "'{s}' is not referenced by any capability preset",
+                    .{ext_tool},
+                ),
+            });
+        }
+    }
+}
+
 fn findPresetByName(presets: []const PresetConfig, name: []const u8) ?PresetConfig {
     for (presets) |preset| {
         if (std.mem.eql(u8, preset.name, name)) return preset;
@@ -1848,7 +1927,10 @@ const known_config_keys = [_][]const u8{
     "security.max_request_bytes",
     "tools.wasmtime_path",
     "tools.plugin_dir",
+    "tools.external_dir",
     "tools.registry.strict",
+    "tools.filter.allow_external",
+    "tools.filter.external_allow_list",
     "queue.dir",
     "queue.poll_ms",
     "queue.max_retries",
@@ -2041,6 +2123,7 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
         .{ &cfg.security.workspace_root, &d.security.workspace_root },
         .{ &cfg.tools.wasmtime_path, &d.tools.wasmtime_path },
         .{ &cfg.tools.plugin_dir, &d.tools.plugin_dir },
+        .{ &cfg.tools.external_dir, &d.tools.external_dir },
         .{ &cfg.queue.dir, &d.queue.dir },
         .{ &cfg.provider_primary.model, &d.provider_primary.model },
         .{ &cfg.provider_primary.base_url, &d.provider_primary.base_url },
@@ -2090,6 +2173,11 @@ fn freeConfigStrings(a: std.mem.Allocator, cfg: *Config) void {
     if (cfg.persistence.git.deny_paths.ptr != d.persistence.git.deny_paths.ptr) {
         for (cfg.persistence.git.deny_paths) |s| a.free(s);
         a.free(cfg.persistence.git.deny_paths);
+    }
+
+    if (cfg.tools.filter.external_allow_list.ptr != d.tools.filter.external_allow_list.ptr) {
+        for (cfg.tools.filter.external_allow_list) |s| a.free(s);
+        a.free(cfg.tools.filter.external_allow_list);
     }
 }
 
@@ -2406,10 +2494,18 @@ fn schemaWriteTomlLayout(w: anytype) void {
         \\      "properties": {
         \\        "wasmtime_path": {"type": "string"},
         \\        "plugin_dir": {"type": "string"},
+        \\        "external_dir": {"type": "string"},
         \\        "registry": {
         \\          "type": "object",
         \\          "properties": {
         \\            "strict": {"type": "boolean"}
+        \\          }
+        \\        },
+        \\        "filter": {
+        \\          "type": "object",
+        \\          "properties": {
+        \\            "allow_external": {"type": "boolean"},
+        \\            "external_allow_list": {"type": "array", "items": {"type": "string"}}
         \\          }
         \\        }
         \\      }
